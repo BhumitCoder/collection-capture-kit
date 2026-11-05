@@ -97,7 +97,8 @@ export function safeAssetName(value: string): string {
 function extensionFor(url: string, contentType?: string): string {
   const path = new URL(url).pathname;
   const match = path.match(/\.([a-zA-Z0-9]{2,5})$/);
-  if (match) return match[1].toLowerCase();
+  const matchedExtension = match?.[1];
+  if (matchedExtension) return matchedExtension.toLowerCase();
   if (contentType?.includes("png")) return "png";
   if (contentType?.includes("webp")) return "webp";
   if (contentType?.includes("mp4")) return "mp4";
@@ -191,7 +192,8 @@ export async function createProductsArchive(
   let skippedFiles = 0;
 
   for (let productIndex = 0; productIndex < products.length; productIndex += 1) {
-    const summary = products[productIndex];
+    const summary = products.at(productIndex);
+    if (!summary) continue;
     onProgress({
       product: productIndex + 1,
       productCount: products.length,
@@ -217,7 +219,8 @@ export async function createProductsArchive(
       zip.file(`${productFolder}/product.json`, JSON.stringify(productRecord, null, 2));
 
       for (let assetIndex = 0; assetIndex < assets.length; assetIndex += 1) {
-        const asset = assets[assetIndex];
+        const asset = assets.at(assetIndex);
+        if (!asset) continue;
         onProgress({
           product: productIndex + 1,
           productCount: products.length,
