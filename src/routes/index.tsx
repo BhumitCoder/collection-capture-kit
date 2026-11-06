@@ -38,12 +38,12 @@ import {
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "Shopify Collection Media Exporter" },
+      { title: "Shopify Collection Media Exporter | Studio Vault" },
       {
         name: "description",
         content: "Browse Shopify collections and download full-quality product photos and available HD videos in organized folders.",
       },
-      { property: "og:title", content: "Shopify Collection Media Exporter" },
+      { property: "og:title", content: "Shopify Collection Media Exporter | Studio Vault" },
       {
         property: "og:description",
         content: "Browse Shopify collections and export product media in organized folders.",
@@ -108,6 +108,8 @@ function Index() {
       setPage(1);
       setSelected(new Set());
       if (results.length === 0) setNotice("No public collections were found for this store.");
+      const firstCollection = results.find((collection) => collection.products_count > 0);
+      if (firstCollection) void openCollection(firstCollection, origin);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not read this store.");
     } finally {
@@ -121,7 +123,7 @@ function Index() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const openCollection = async (collection: ShopifyCollection) => {
+  const openCollection = async (collection: ShopifyCollection, storeOrigin = store) => {
     setActiveCollection(collection);
     setProducts([]);
     setPage(1);
@@ -131,7 +133,7 @@ function Index() {
     setNotice("");
     setLoadingProducts(true);
     try {
-      const results = await fetchCollectionProducts(store, collection.handle, 1);
+      const results = await fetchCollectionProducts(storeOrigin, collection.handle, 1);
       setProducts(results);
       setHasMore(results.length === SHOPIFY_PAGE_SIZE);
       if (results.length === 0) setNotice("This collection has no publicly listed products.");
@@ -280,6 +282,13 @@ function Index() {
                 className={`collection-row ${activeCollection?.id === collection.id ? "is-active" : ""}`}
                 onClick={() => void openCollection(collection)}
               >
+                <span className="collection-thumbnail" aria-hidden="true">
+                  {collection.image?.src ? (
+                    <img src={getHighResolutionImageUrl(collection.image.src)} alt="" loading="lazy" />
+                  ) : (
+                    <Gem />
+                  )}
+                </span>
                 <span className="collection-index">{String(index + 1).padStart(2, "0")}</span>
                 <span className="collection-copy">
                   <span className="collection-title">{collection.title}</span>
