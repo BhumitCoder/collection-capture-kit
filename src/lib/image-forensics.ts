@@ -274,8 +274,8 @@ export async function analyzeImage(file: Blob, filename: string, modifiedAt?: nu
   const hash = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
   const modifiedDate = modifiedAt ? new Date(modifiedAt).toLocaleString() : "Remote file · date not supplied";
   const dateCaptured = metadataDateValue(metadata, ["DateTimeOriginal", "CreateDate", "Date Created", "DateTimeDigitized"]);
-  const width = Number(metadata?.ImageWidth ?? metadata?.ExifImageWidth ?? metadata?.width ?? 0);
-  const height = Number(metadata?.ImageHeight ?? metadata?.ExifImageHeight ?? metadata?.height ?? 0);
+  const width = Number(metadata?.["ImageWidth"] ?? metadata?.["ExifImageWidth"] ?? metadata?.["width"] ?? 0);
+  const height = Number(metadata?.["ImageHeight"] ?? metadata?.["ExifImageHeight"] ?? metadata?.["height"] ?? 0);
   let bitmap: ImageBitmap | null = null;
   let colors = { averageRgb: "Unavailable", palette: [] as ImagePaletteColor[], histogram: [] as string[], differenceHash: "Unavailable" };
   try {
