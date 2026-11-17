@@ -357,7 +357,7 @@
   .sidebar-heading h1 { font-size: 21px; }
   .store-form { margin: 0 2px 11px; }
   .sidebar-search { margin: 0 2px 8px; }
-  .collection-list { max-height: 178px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px; }
+  .collection-list { max-height: 104px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px; }
   .collection-row { min-height: 54px; gap: 6px; padding: 5px; }
   .collection-thumbnail { width: 31px; height: 36px; flex-basis: 31px; }
   .collection-index { display: none; }
@@ -384,7 +384,7 @@
   .dock-actions button { min-height: 34px; padding-right: 8px; padding-left: 8px; font-size: 10px; }
   .export-progress { order: 3; flex-basis: 100%; }
   .download-nudge { right: 8px; bottom: 8px; left: 8px; padding: 8px; }
-  .download-nudge > span { font-size: 9px; }
+  .download-nudge > span { flex: 0 1 auto; font-size: 9px; white-space: nowrap; }
   .download-nudge button { min-height: 34px; padding-right: 8px; padding-left: 8px; font-size: 10px; }
   .empty-library { min-height: 360px; padding: 35px 8px; }
   .empty-library h2 { font-size: 38px; }
