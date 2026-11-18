@@ -10,8 +10,10 @@ import {
   Gem,
   Image as ImageIcon,
   LoaderCircle,
+  LockKeyhole,
   Search,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Video,
   X,
@@ -21,16 +23,21 @@ import { Topbar } from "@/components/topbar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   createProductsArchive,
   DEFAULT_STORE_URL,
   downloadArchive,
   fetchCollectionProducts,
   fetchCollections,
+  FULL_CLEAN_OPTIONS,
   getHighResolutionImageUrl,
   getStoreOrigin,
+  NO_CLEAN_OPTIONS,
   SHOPIFY_PAGE_SIZE,
+  type ArchiveCleanOptions,
   type ExportProgress,
+  type ExportResult,
   type ShopifyCollection,
   type ShopifyProductSummary,
 } from "@/lib/shopify-storefront";
@@ -75,6 +82,173 @@ function mergeUniqueProducts(
   return merged;
 }
 
+function countEnabledCleanOptions(options: ArchiveCleanOptions): number {
+  return [options.stripImageMetadata, options.cleanFilenames, options.removeSourceFootprint].filter(
+    Boolean,
+  ).length;
+}
+
+function formatExportNotice(
+  result: ExportResult,
+  options: ArchiveCleanOptions,
+  scope: "selected" | "collection",
+): string {
+  const folderNoun = options.cleanFilenames ? "item folder" : "product folder";
+  const folderJoin = scope === "collection" ? "across" : "in";
+  const details: string[] = [];
+  if (options.stripImageMetadata && result.cleanedImages) {
+    details.push(
+      `${result.cleanedImages} image${result.cleanedImages === 1 ? "" : "s"} scrubbed A–Z`,
+    );
+  }
+  if (options.cleanFilenames) details.push("neutral filenames");
+  if (options.removeSourceFootprint) details.push("zero store footprint");
+
+  const skippedSuffix = result.skipped
+    ? ` · ${result.skipped} unavailable file${result.skipped === 1 ? "" : "s"} skipped`
+    : "";
+  const cleanSuffix = details.length > 0 ? ` · ${details.join(", ")}` : "";
+
+  return `Downloaded ${result.files} ${details.length > 0 ? "cleaned " : "media "}file${result.files === 1 ? "" : "s"} ${folderJoin} ${result.products} ${folderNoun}${result.products === 1 ? "" : "s"}${cleanSuffix}${skippedSuffix}.`;
+}
+
+type CleanExportControlProps = {
+  options: ArchiveCleanOptions;
+  onChange: (next: ArchiveCleanOptions) => void;
+  disabled?: boolean;
+};
+
+function CleanExportControl({ options, onChange, disabled }: CleanExportControlProps) {
+  const enabledCount = countEnabledCleanOptions(options);
+  const allEnabled = enabledCount === 3;
+  const anyEnabled = enabledCount > 0;
+
+  const toggleAll = () => {
+    onChange(allEnabled ? { ...NO_CLEAN_OPTIONS } : { ...FULL_CLEAN_OPTIONS });
+  };
+
+  const toggleKey = (key: keyof ArchiveCleanOptions) => {
+    onChange({ ...options, [key]: !options[key] });
+  };
+
+  return (
+    <div className={`clean-export-control ${anyEnabled ? "is-active" : ""}`}>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={anyEnabled}
+        className="clean-toggle-button"
+        onClick={toggleAll}
+        disabled={disabled}
+        title={
+          allEnabled
+            ? "Clean A–Z enabled — click to switch to original files"
+            : "Enable full A–Z image metadata, signature, history, filename & footprint cleaning"
+        }
+      >
+        <ShieldCheck aria-hidden="true" />
+        <span>
+          {allEnabled ? "Clean A–Z" : anyEnabled ? `Clean (${enabledCount}/3)` : "Clean A–Z"}
+        </span>
+        <span className="clean-state-pill">{anyEnabled ? "ON" : "OFF"}</span>
+      </button>
+      <Popover>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            className="clean-options-trigger"
+            aria-label="Clean export options"
+            title="Customize A–Z clean options"
+            disabled={disabled}
+          >
+            <SlidersHorizontal aria-hidden="true" />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent side="top" align="end" className="clean-popover">
+          <div className="clean-popover-head">
+            <div className="eyebrow">BROWSER-LOCAL SCRUB</div>
+            <h3>A–Z Clean ZIP Export</h3>
+            <p>
+              Clean every image and archive detail locally in your browser before downloading the
+              ZIP.
+            </p>
+          </div>
+          <div className="clean-option-list">
+            <label className="clean-option-row">
+              <input
+                type="checkbox"
+                checked={options.stripImageMetadata}
+                onChange={() => toggleKey("stripImageMetadata")}
+              />
+              <span>
+                <strong>Image metadata, signatures &amp; history</strong>
+                <small>
+                  Re-encodes every photo locally to wipe EXIF, XMP, IPTC, GPS, camera/device, dates,
+                  editing history, C2PA signatures, ICC profiles, thumbnails &amp; original SHA-256
+                  footprint.
+                </small>
+              </span>
+            </label>
+            <label className="clean-option-row">
+              <input
+                type="checkbox"
+                checked={options.cleanFilenames}
+                onChange={() => toggleKey("cleanFilenames")}
+              />
+              <span>
+                <strong>Clean neutral filenames &amp; folders</strong>
+                <small>
+                  Replaces store, collection &amp; product slugs with neutral names (
+                  <code>clean-media/item-01/images/image-01.jpg</code>) and a clean ZIP filename.
+                </small>
+              </span>
+            </label>
+            <label className="clean-option-row">
+              <input
+                type="checkbox"
+                checked={options.removeSourceFootprint}
+                onChange={() => toggleKey("removeSourceFootprint")}
+              />
+              <span>
+                <strong>Remove store footprint &amp; timestamps</strong>
+                <small>
+                  Omits <code>manifest.json</code> &amp; <code>product.json</code> (store URLs,
+                  vendor, CDN links) and neutralizes all ZIP file dates.
+                </small>
+              </span>
+            </label>
+          </div>
+          <div className="clean-popover-actions">
+            <Button
+              type="button"
+              size="sm"
+              variant={allEnabled ? "default" : "outline"}
+              onClick={() => onChange({ ...FULL_CLEAN_OPTIONS })}
+            >
+              Clean all (A–Z)
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={!anyEnabled ? "default" : "ghost"}
+              onClick={() => onChange({ ...NO_CLEAN_OPTIONS })}
+            >
+              Original files
+            </Button>
+          </div>
+          <div className="clean-popover-note">
+            <LockKeyhole aria-hidden="true" />
+            <span>
+              Image scrubbing runs 100% in your browser. HD videos keep clean filenames &amp; dates
+              without re-encoding.
+            </span>
+          </div>
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
 function Index() {
   const [storeInput, setStoreInput] = useState(DEFAULT_STORE_URL);
   const [store, setStore] = useState(DEFAULT_STORE_URL);
@@ -92,6 +266,7 @@ function Index() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [progress, setProgress] = useState<ExportProgress | null>(null);
+  const [cleanOptions, setCleanOptions] = useState<ArchiveCleanOptions>(FULL_CLEAN_OPTIONS);
 
   const collectionsAbortRef = useRef<AbortController | null>(null);
   const productsAbortRef = useRef<AbortController | null>(null);
@@ -285,15 +460,13 @@ function Index() {
         items,
         setProgress,
         controller.signal,
+        cleanOptions,
       );
-      downloadArchive(blob, `${activeCollection.handle}-media.zip`);
-      setNotice(
-        `Downloaded ${result.files} media file${result.files === 1 ? "" : "s"} in ${result.products} product folder${result.products === 1 ? "" : "s"}${
-          result.skipped
-            ? ` · ${result.skipped} unavailable file${result.skipped === 1 ? "" : "s"} skipped`
-            : ""
-        }.`,
-      );
+      const archiveFilename = cleanOptions.cleanFilenames
+        ? "studio-export-clean.zip"
+        : `${activeCollection.handle}-media.zip`;
+      downloadArchive(blob, archiveFilename);
+      setNotice(formatExportNotice(result, cleanOptions, "selected"));
     } catch (cause) {
       if (controller.signal.aborted || isAbortError(cause)) {
         setNotice("Export cancelled.");
@@ -349,15 +522,13 @@ function Index() {
         allProducts,
         setProgress,
         controller.signal,
+        cleanOptions,
       );
-      downloadArchive(blob, `${activeCollection.handle}-media.zip`);
-      setNotice(
-        `Downloaded ${result.files} media file${result.files === 1 ? "" : "s"} across ${result.products} product folder${result.products === 1 ? "" : "s"}${
-          result.skipped
-            ? ` · ${result.skipped} unavailable file${result.skipped === 1 ? "" : "s"} skipped`
-            : ""
-        }.`,
-      );
+      const archiveFilename = cleanOptions.cleanFilenames
+        ? "studio-export-clean.zip"
+        : `${activeCollection.handle}-media.zip`;
+      downloadArchive(blob, archiveFilename);
+      setNotice(formatExportNotice(result, cleanOptions, "collection"));
     } catch (cause) {
       if (controller.signal.aborted || isAbortError(cause)) {
         setNotice("Export cancelled.");
@@ -741,6 +912,11 @@ function Index() {
             </div>
           )}
           <div className="dock-actions">
+            <CleanExportControl
+              options={cleanOptions}
+              onChange={setCleanOptions}
+              disabled={exporting}
+            />
             {exporting ? (
               <Button type="button" variant="outline" size="sm" onClick={cancelExport}>
                 <X /> Cancel
@@ -788,12 +964,22 @@ function Index() {
               <span>{progress?.label ?? "Preparing download…"}</span>
               <span>{progressPercent}</span>
             </div>
+          ) : countEnabledCleanOptions(cleanOptions) > 0 ? (
+            <span>
+              <ShieldCheck aria-hidden="true" /> Clean A–Z mode · metadata, signatures, history
+              &amp; filenames scrubbed
+            </span>
           ) : (
             <span>
               <Video aria-hidden="true" /> Product photos and available HD video
             </span>
           )}
           <div className="dock-actions">
+            <CleanExportControl
+              options={cleanOptions}
+              onChange={setCleanOptions}
+              disabled={exporting}
+            />
             {exporting && (
               <Button type="button" variant="ghost" size="sm" onClick={cancelExport}>
                 <X /> Cancel

@@ -61,8 +61,10 @@ export function Topbar({ activePage, caption, statusText }: TopbarProps) {
               <li>
                 <FolderArchive aria-hidden="true" />
                 <span>
-                  <strong>Structured exports:</strong> Downloads original-resolution photos and
-                  metadata into <code>&lt;collection&gt;/products/&lt;handle&gt;/</code> folders.
+                  <strong>Structured &amp; clean A–Z exports:</strong> Download original product
+                  folders, or enable <strong>Clean A–Z</strong> to scrub EXIF, XMP, IPTC, GPS,
+                  signatures, editing history, filenames &amp; store footprints locally in your
+                  browser before packing the ZIP.
                 </span>
               </li>
               <li>

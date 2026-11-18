@@ -134,7 +134,10 @@ export function ImageInspector() {
     try {
       const cleanCopy = await createMetadataFreeCopy(entry.file, entry.file.type);
       if (!mountedRef.current) return;
-      downloadImage(cleanCopy, metadataFreeFilename(entry.file.name, entry.file.type));
+      downloadImage(
+        cleanCopy,
+        metadataFreeFilename(entry.file.name, cleanCopy.type || entry.file.type),
+      );
     } catch (cause) {
       if (!mountedRef.current) return;
       const message = cause instanceof Error ? cause.message : "A clean copy could not be created.";

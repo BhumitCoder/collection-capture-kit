@@ -1,5 +1,7 @@
 import type JSZip from "jszip";
 
+import { sanitizeImageBytes } from "@/lib/image-forensics";
+
 const envDefaultStore =
   typeof import.meta !== "undefined" && import.meta.env?.["VITE_DEFAULT_STORE_URL"]
     ? String(import.meta.env["VITE_DEFAULT_STORE_URL"]).trim()
@@ -70,7 +72,32 @@ export type ExportProgress = {
   label: string;
 };
 
-export type ExportResult = { files: number; skipped: number; products: number };
+export type ArchiveCleanOptions = {
+  stripImageMetadata: boolean;
+  cleanFilenames: boolean;
+  removeSourceFootprint: boolean;
+};
+
+export const FULL_CLEAN_OPTIONS: ArchiveCleanOptions = {
+  stripImageMetadata: true,
+  cleanFilenames: true,
+  removeSourceFootprint: true,
+};
+
+export const NO_CLEAN_OPTIONS: ArchiveCleanOptions = {
+  stripImageMetadata: false,
+  cleanFilenames: false,
+  removeSourceFootprint: false,
+};
+
+export const NEUTRAL_ZIP_DATE = new Date(Date.UTC(2000, 0, 1, 0, 0, 0));
+
+export type ExportResult = {
+  files: number;
+  skipped: number;
+  products: number;
+  cleanedImages?: number;
+};
 
 const LEGACY_SHOPIFY_SIZE_SUFFIX =
   /(?:_(?:pico|icon|thumb|small|compact|medium|large|grande|master|\d+x\d*|x\d+)(?:_crop_(?:top|center|bottom|left|right))?(?:@[23]x)?)(?=\.[a-zA-Z0-9]{2,5}$)/i;
@@ -291,7 +318,11 @@ export async function fetchProductDetail(
   );
 }
 
-export function getProductAssets(detail: ShopifyProductDetail, store: string): ProductAsset[] {
+export function getProductAssets(
+  detail: ShopifyProductDetail,
+  store: string,
+  cleanFilenames = false,
+): ProductAsset[] {
   const origin = getStoreOrigin(store);
   const imageUrls = new Set<string>();
   const videoUrls = new Set<string>();
@@ -322,18 +353,28 @@ export function getProductAssets(detail: ShopifyProductDetail, store: string): P
   }
 
   const slug = safeAssetName(detail.handle);
-  const imageAssets: ProductAsset[] = Array.from(imageUrls).map((url, index) => ({
-    url,
-    path: `images/${String(index + 1).padStart(2, "0")}-${slug}.${extensionFor(url)}`,
-    label: `Image ${index + 1}`,
-    kind: "image",
-  }));
-  const videoAssets: ProductAsset[] = videos.map((video, index) => ({
-    url: video.url,
-    path: `videos/${String(index + 1).padStart(2, "0")}-${slug}${video.height > 0 ? `-${video.height}p` : ""}.mp4`,
-    label: video.height > 0 ? `Video ${index + 1} · ${video.height}p` : `Video ${index + 1}`,
-    kind: "video",
-  }));
+  const imageAssets: ProductAsset[] = Array.from(imageUrls).map((url, index) => {
+    const seq = String(index + 1).padStart(2, "0");
+    return {
+      url,
+      path: cleanFilenames
+        ? `images/image-${seq}.${extensionFor(url)}`
+        : `images/${seq}-${slug}.${extensionFor(url)}`,
+      label: `Image ${index + 1}`,
+      kind: "image",
+    };
+  });
+  const videoAssets: ProductAsset[] = videos.map((video, index) => {
+    const seq = String(index + 1).padStart(2, "0");
+    return {
+      url: video.url,
+      path: cleanFilenames
+        ? `videos/video-${seq}.mp4`
+        : `videos/${seq}-${slug}${video.height > 0 ? `-${video.height}p` : ""}.mp4`,
+      label: video.height > 0 ? `Video ${index + 1} · ${video.height}p` : `Video ${index + 1}`,
+      kind: "video",
+    };
+  });
   return [...imageAssets, ...videoAssets];
 }
 
@@ -382,12 +423,35 @@ async function addRemoteFile(
   zip: JSZip,
   url: string,
   targetPath: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  const { bytes, contentType } = await fetchMediaBytes(url, signal);
-  const resolvedPath = replacePathExtension(targetPath, extensionFor(url, contentType));
-  zip.file(resolvedPath, bytes);
-  return resolvedPath;
+  options: {
+    kind: "image" | "video";
+    stripImageMetadata: boolean;
+    neutralizeDate: boolean;
+    signal?: AbortSignal | undefined;
+  },
+): Promise<{ path: string; cleaned: boolean }> {
+  const { bytes, contentType } = await fetchMediaBytes(url, options.signal);
+  throwIfAborted(options.signal);
+
+  let finalBytes: Uint8Array = bytes;
+  let finalContentType = contentType;
+  let cleaned = false;
+
+  if (options.kind === "image" && options.stripImageMetadata) {
+    const sanitized = await sanitizeImageBytes(bytes, contentType);
+    throwIfAborted(options.signal);
+    finalBytes = sanitized.bytes;
+    finalContentType = sanitized.mimeType;
+    cleaned = true;
+  }
+
+  const resolvedPath = replacePathExtension(targetPath, extensionFor(url, finalContentType));
+  zip.file(
+    resolvedPath,
+    finalBytes,
+    options.neutralizeDate ? { date: NEUTRAL_ZIP_DATE } : undefined,
+  );
+  return { path: resolvedPath, cleaned };
 }
 
 async function runWithConcurrency<T>(
@@ -417,13 +481,21 @@ export async function createProductsArchive(
   products: ShopifyProductSummary[],
   onProgress: (progress: ExportProgress) => void,
   signal?: AbortSignal,
+  cleanOptions?: Partial<ArchiveCleanOptions>,
 ): Promise<{ blob: Blob; result: ExportResult }> {
+  const clean: ArchiveCleanOptions = {
+    stripImageMetadata: Boolean(cleanOptions?.stripImageMetadata),
+    cleanFilenames: Boolean(cleanOptions?.cleanFilenames),
+    removeSourceFootprint: Boolean(cleanOptions?.removeSourceFootprint),
+  };
+
   const origin = getStoreOrigin(store);
   const { default: JSZip } = await import("jszip");
   const zip = new JSZip();
-  const collectionFolder = safeAssetName(collection.handle);
+  const collectionFolder = clean.cleanFilenames ? "clean-media" : safeAssetName(collection.handle);
   let completedFiles = 0;
   let skippedFiles = 0;
+  let cleanedImages = 0;
 
   const uniqueProducts: ShopifyProductSummary[] = [];
   const seenHandles = new Set<string>();
@@ -434,8 +506,13 @@ export async function createProductsArchive(
     }
   }
 
+  const folderPadWidth = Math.max(2, String(uniqueProducts.length).length);
   const usedFolderNames = new Set<string>();
-  const reserveProductFolder = (handle: string): string => {
+  const reserveProductFolder = (handle: string, index: number): string => {
+    if (clean.cleanFilenames) {
+      const seq = String(index + 1).padStart(folderPadWidth, "0");
+      return `${collectionFolder}/item-${seq}`;
+    }
     const base = safeAssetName(handle);
     let candidate = base;
     let suffix = 2;
@@ -457,13 +534,13 @@ export async function createProductsArchive(
       productCount: uniqueProducts.length,
       asset: 0,
       assetCount: 0,
-      label: summary.title,
+      label: clean.stripImageMetadata ? `Cleaning ${summary.title}` : summary.title,
     });
 
     try {
       const detail = await fetchProductDetail(origin, summary.handle, signal);
-      const productFolder = reserveProductFolder(summary.handle);
-      const assets = getProductAssets(detail, origin);
+      const productFolder = reserveProductFolder(summary.handle, productIndex);
+      const assets = getProductAssets(detail, origin, clean.cleanFilenames);
       const recordedMedia: Array<{
         path: string;
         url: string;
@@ -478,14 +555,14 @@ export async function createProductsArchive(
         ASSET_DOWNLOAD_CONCURRENCY,
         async (asset, assetIndex) => {
           try {
-            const savedFullPath = await addRemoteFile(
-              zip,
-              asset.url,
-              `${productFolder}/${asset.path}`,
+            const saved = await addRemoteFile(zip, asset.url, `${productFolder}/${asset.path}`, {
+              kind: asset.kind,
+              stripImageMetadata: clean.stripImageMetadata,
+              neutralizeDate: clean.removeSourceFootprint,
               signal,
-            );
-            const savedRelativePath = savedFullPath.startsWith(`${productFolder}/`)
-              ? savedFullPath.slice(productFolder.length + 1)
+            });
+            const savedRelativePath = saved.path.startsWith(`${productFolder}/`)
+              ? saved.path.slice(productFolder.length + 1)
               : asset.path;
             recordedMedia[assetIndex] = {
               path: savedRelativePath,
@@ -495,6 +572,7 @@ export async function createProductsArchive(
               downloaded: true,
             };
             completedFiles += 1;
+            if (saved.cleaned) cleanedImages += 1;
           } catch (cause) {
             if (signal?.aborted || (cause instanceof Error && cause.name === "AbortError")) {
               throw createAbortError();
@@ -514,25 +592,30 @@ export async function createProductsArchive(
               productCount: uniqueProducts.length,
               asset: processedAssets,
               assetCount: assets.length,
-              label: `${summary.title} · ${asset.label}`,
+              label:
+                clean.stripImageMetadata && asset.kind === "image"
+                  ? `${summary.title} · Cleaned ${asset.label}`
+                  : `${summary.title} · ${asset.label}`,
             });
           }
         },
         signal,
       );
 
-      const productRecord = {
-        id: detail.id,
-        title: detail.title,
-        handle: detail.handle,
-        vendor: detail.vendor ?? summary.vendor ?? null,
-        productType: detail.type ?? detail.product_type ?? summary.product_type ?? null,
-        description: detail.description ?? "",
-        priceCents: detail.price ?? null,
-        source: `${origin}/products/${detail.handle}`,
-        media: recordedMedia.filter(Boolean),
-      };
-      zip.file(`${productFolder}/product.json`, JSON.stringify(productRecord, null, 2));
+      if (!clean.removeSourceFootprint) {
+        const productRecord = {
+          id: detail.id,
+          title: detail.title,
+          handle: detail.handle,
+          vendor: detail.vendor ?? summary.vendor ?? null,
+          productType: detail.type ?? detail.product_type ?? summary.product_type ?? null,
+          description: detail.description ?? "",
+          priceCents: detail.price ?? null,
+          source: `${origin}/products/${detail.handle}`,
+          media: recordedMedia.filter(Boolean),
+        };
+        zip.file(`${productFolder}/product.json`, JSON.stringify(productRecord, null, 2));
+      }
 
       if (assets.length === 0) skippedFiles += 1;
     } catch (cause) {
@@ -548,14 +631,20 @@ export async function createProductsArchive(
   let coverFile: string | null = null;
   if (cover) {
     try {
-      const coverPath = await addRemoteFile(
+      const savedCover = await addRemoteFile(
         zip,
         getHighResolutionImageUrl(cover, origin),
-        `${collectionFolder}/collection-cover.jpg`,
-        signal,
+        `${collectionFolder}/${clean.cleanFilenames ? "cover.jpg" : "collection-cover.jpg"}`,
+        {
+          kind: "image",
+          stripImageMetadata: clean.stripImageMetadata,
+          neutralizeDate: clean.removeSourceFootprint,
+          signal,
+        },
       );
-      coverFile = coverPath.slice(collectionFolder.length + 1);
+      coverFile = savedCover.path.slice(collectionFolder.length + 1);
       completedFiles += 1;
+      if (savedCover.cleaned) cleanedImages += 1;
     } catch (cause) {
       if (signal?.aborted || (cause instanceof Error && cause.name === "AbortError")) {
         throw createAbortError();
@@ -564,39 +653,64 @@ export async function createProductsArchive(
     }
   }
 
-  zip.file(
-    `${collectionFolder}/manifest.json`,
-    JSON.stringify(
-      {
-        collection: { title: collection.title, handle: collection.handle },
-        store: origin,
-        coverFile,
-        exportedAt: new Date().toISOString(),
-        products: uniqueProducts.map(({ title, handle }) => ({ title, handle })),
-        filesDownloaded: completedFiles,
-        filesSkipped: skippedFiles,
-      },
-      null,
-      2,
-    ),
+  if (!clean.removeSourceFootprint) {
+    zip.file(
+      `${collectionFolder}/manifest.json`,
+      JSON.stringify(
+        {
+          collection: { title: collection.title, handle: collection.handle },
+          store: origin,
+          coverFile,
+          exportedAt: new Date().toISOString(),
+          products: uniqueProducts.map(({ title, handle }) => ({ title, handle })),
+          filesDownloaded: completedFiles,
+          filesSkipped: skippedFiles,
+        },
+        null,
+        2,
+      ),
+    );
+  }
+
+  if (clean.removeSourceFootprint) {
+    for (const entry of Object.values(zip.files)) {
+      entry.date = NEUTRAL_ZIP_DATE;
+    }
+  }
+
+  throwIfAborted(signal);
+  const blob = await zip.generateAsync(
+    {
+      type: "blob",
+      compression: "STORE",
+      ...(clean.removeSourceFootprint ? { comment: "" } : {}),
+    },
+    (metadata) => {
+      onProgress({
+        product: uniqueProducts.length,
+        productCount: uniqueProducts.length,
+        asset: Math.round(metadata.percent),
+        assetCount: 100,
+        label: clean.stripImageMetadata ? "Packing cleaned archive" : "Packing product folders",
+      });
+    },
   );
-
-  throwIfAborted(signal);
-  const blob = await zip.generateAsync({ type: "blob", compression: "STORE" }, (metadata) => {
-    onProgress({
-      product: uniqueProducts.length,
-      productCount: uniqueProducts.length,
-      asset: Math.round(metadata.percent),
-      assetCount: 100,
-      label: "Packing product folders",
-    });
-  });
   throwIfAborted(signal);
 
-  return {
-    blob,
-    result: { files: completedFiles, skipped: skippedFiles, products: uniqueProducts.length },
-  };
+  const result: ExportResult = clean.stripImageMetadata
+    ? {
+        files: completedFiles,
+        skipped: skippedFiles,
+        products: uniqueProducts.length,
+        cleanedImages,
+      }
+    : {
+        files: completedFiles,
+        skipped: skippedFiles,
+        products: uniqueProducts.length,
+      };
+
+  return { blob, result };
 }
 
 export function downloadArchive(blob: Blob, filename: string): void {

@@ -659,31 +659,398 @@ export async function analyzeImage(
   };
 }
 
-export async function createMetadataFreeCopy(file: Blob, mimeType: string): Promise<Blob> {
-  const image = await createImageBitmap(file);
-  const canvas = document.createElement("canvas");
-  canvas.width = image.width;
-  canvas.height = image.height;
-  const context = canvas.getContext("2d");
-  if (!context) {
-    image.close();
+const NEUTRAL_JFIF_SEGMENT = new Uint8Array([
+  0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01,
+  0x00, 0x00,
+]);
+
+const ALLOWED_PNG_CHUNKS = new Set(["IHDR", "PLTE", "tRNS", "IDAT", "IEND"]);
+const STRIPPED_WEBP_CHUNKS = new Set(["EXIF", "XMP ", "ICCP"]);
+
+function concatByteArrays(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
+  let total = 0;
+  for (const part of parts) total += part.byteLength;
+  const output = new Uint8Array(new ArrayBuffer(total));
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.byteLength;
+  }
+  return output;
+}
+
+function writeUint32LE(target: Uint8Array, offset: number, value: number): void {
+  target[offset] = value & 0xff;
+  target[offset + 1] = (value >>> 8) & 0xff;
+  target[offset + 2] = (value >>> 16) & 0xff;
+  target[offset + 3] = (value >>> 24) & 0xff;
+}
+
+export function stripJpegMetadata(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+    return concatByteArrays([bytes]);
+  }
+
+  const parts: Uint8Array[] = [new Uint8Array([0xff, 0xd8])];
+  let offset = 2;
+  let emittedJfif = false;
+
+  while (offset < bytes.length) {
+    while (offset < bytes.length && bytes[offset] !== 0xff) offset += 1;
+    while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
+    if (offset >= bytes.length) break;
+
+    const marker = bytes[offset];
+    if (marker === undefined) break;
+    offset += 1;
+
+    if (marker === 0xd9) {
+      parts.push(new Uint8Array([0xff, 0xd9]));
+      break;
+    }
+
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      parts.push(new Uint8Array([0xff, marker]));
+      continue;
+    }
+
+    if (offset + 2 > bytes.length) {
+      return concatByteArrays([bytes]);
+    }
+
+    const segmentLength = ((bytes[offset] ?? 0) << 8) | (bytes[offset + 1] ?? 0);
+    if (segmentLength < 2 || offset + segmentLength > bytes.length) {
+      return concatByteArrays([bytes]);
+    }
+
+    if (marker === 0xe0) {
+      const isJfif =
+        segmentLength >= 7 &&
+        bytes[offset + 2] === 0x4a &&
+        bytes[offset + 3] === 0x46 &&
+        bytes[offset + 4] === 0x49 &&
+        bytes[offset + 5] === 0x46 &&
+        bytes[offset + 6] === 0x00;
+      if (isJfif && !emittedJfif) {
+        parts.push(NEUTRAL_JFIF_SEGMENT);
+        emittedJfif = true;
+      }
+      offset += segmentLength;
+      continue;
+    }
+
+    if ((marker >= 0xe1 && marker <= 0xef) || marker === 0xfe) {
+      offset += segmentLength;
+      continue;
+    }
+
+    if (marker === 0xda) {
+      parts.push(new Uint8Array([0xff, marker]));
+      parts.push(bytes.subarray(offset, offset + segmentLength));
+      const scanStart = offset + segmentLength;
+      let pos = scanStart;
+      let foundNextMarker = false;
+
+      while (pos < bytes.length) {
+        if (bytes[pos] === 0xff) {
+          let nextPos = pos + 1;
+          while (nextPos < bytes.length && bytes[nextPos] === 0xff) nextPos += 1;
+          if (nextPos >= bytes.length) {
+            pos = bytes.length;
+            break;
+          }
+          const nextByte = bytes[nextPos];
+          if (
+            nextByte === 0x00 ||
+            (nextByte !== undefined && nextByte >= 0xd0 && nextByte <= 0xd7)
+          ) {
+            pos = nextPos + 1;
+            continue;
+          }
+          parts.push(bytes.subarray(scanStart, pos));
+          offset = pos;
+          foundNextMarker = true;
+          break;
+        }
+        pos += 1;
+      }
+
+      if (!foundNextMarker) {
+        parts.push(bytes.subarray(scanStart, bytes.length));
+        offset = bytes.length;
+      }
+      continue;
+    }
+
+    parts.push(new Uint8Array([0xff, marker]));
+    parts.push(bytes.subarray(offset, offset + segmentLength));
+    offset += segmentLength;
+  }
+
+  return concatByteArrays(parts);
+}
+
+export function stripPngMetadata(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (
+    bytes.length < 24 ||
+    bytes[0] !== 0x89 ||
+    bytes[1] !== 0x50 ||
+    bytes[2] !== 0x4e ||
+    bytes[3] !== 0x47 ||
+    bytes[4] !== 0x0d ||
+    bytes[5] !== 0x0a ||
+    bytes[6] !== 0x1a ||
+    bytes[7] !== 0x0a
+  ) {
+    return concatByteArrays([bytes]);
+  }
+
+  const parts: Uint8Array[] = [bytes.subarray(0, 8)];
+  let offset = 8;
+  let sawIhdr = false;
+  let sawIend = false;
+
+  while (offset + 12 <= bytes.length) {
+    const length = readUint32BE(bytes, offset);
+    if (offset + 12 + length > bytes.length) {
+      return concatByteArrays([bytes]);
+    }
+    const type = String.fromCharCode(
+      bytes[offset + 4] ?? 0,
+      bytes[offset + 5] ?? 0,
+      bytes[offset + 6] ?? 0,
+      bytes[offset + 7] ?? 0,
+    );
+    if (type === "IHDR") sawIhdr = true;
+    if (ALLOWED_PNG_CHUNKS.has(type)) {
+      parts.push(bytes.subarray(offset, offset + 12 + length));
+    }
+    offset += 12 + length;
+    if (type === "IEND") {
+      sawIend = true;
+      break;
+    }
+  }
+
+  if (!sawIhdr || !sawIend) {
+    return concatByteArrays([bytes]);
+  }
+  return concatByteArrays(parts);
+}
+
+export function stripWebpMetadata(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (
+    bytes.length < 12 ||
+    String.fromCharCode(...bytes.slice(0, 4)) !== "RIFF" ||
+    String.fromCharCode(...bytes.slice(8, 12)) !== "WEBP"
+  ) {
+    return concatByteArrays([bytes]);
+  }
+
+  const declaredEnd = Math.min(bytes.length, 8 + readUint32LE(bytes, 4));
+  const keptChunks: Uint8Array[] = [];
+  let offset = 12;
+
+  while (offset + 8 <= declaredEnd) {
+    const fourCC = String.fromCharCode(
+      bytes[offset] ?? 0,
+      bytes[offset + 1] ?? 0,
+      bytes[offset + 2] ?? 0,
+      bytes[offset + 3] ?? 0,
+    );
+    const chunkSize = readUint32LE(bytes, offset + 4);
+    const paddedSize = chunkSize + (chunkSize % 2);
+    if (offset + 8 + chunkSize > bytes.length) {
+      return concatByteArrays([bytes]);
+    }
+
+    if (!STRIPPED_WEBP_CHUNKS.has(fourCC)) {
+      const chunkBuffer = new Uint8Array(8 + paddedSize);
+      chunkBuffer.set(bytes.subarray(offset, offset + 8 + chunkSize), 0);
+      if (fourCC === "VP8X" && chunkSize >= 10) {
+        // Clear ICC (0x20), EXIF (0x08), and XMP (0x04) feature flags while preserving alpha & animation.
+        chunkBuffer[8] = (chunkBuffer[8] ?? 0) & ~(0x20 | 0x08 | 0x04);
+      }
+      keptChunks.push(chunkBuffer);
+    }
+
+    offset += 8 + paddedSize;
+  }
+
+  let chunksPayloadSize = 0;
+  for (const chunk of keptChunks) chunksPayloadSize += chunk.byteLength;
+
+  const header = new Uint8Array(12);
+  header.set([0x52, 0x49, 0x46, 0x46], 0); // RIFF
+  writeUint32LE(header, 4, 4 + chunksPayloadSize);
+  header.set([0x57, 0x45, 0x42, 0x50], 8); // WEBP
+
+  return concatByteArrays([header, ...keptChunks]);
+}
+
+export function stripSvgMetadata(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  const text = new TextDecoder().decode(bytes);
+  const cleaned = text
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<metadata\b[^>]*>[\s\S]*?<\/metadata>/gi, "")
+    .replace(/<title\b[^>]*>[\s\S]*?<\/title>/gi, "")
+    .replace(/<desc\b[^>]*>[\s\S]*?<\/desc>/gi, "")
+    .replace(/\s+(?:inkscape|sodipodi|sketch):[a-zA-Z0-9_-]+="[^"]*"/g, "")
+    .trim();
+  const encoded = new TextEncoder().encode(cleaned);
+  return concatByteArrays([encoded]);
+}
+
+export function stripImageContainerMetadata(
+  bytes: Uint8Array,
+  mimeType = "",
+): Uint8Array<ArrayBuffer> {
+  const format = detectImageFormat(bytes, mimeType);
+  if (format === "JPEG") return stripJpegMetadata(bytes);
+  if (format === "PNG") return stripPngMetadata(bytes);
+  if (format === "WebP") return stripWebpMetadata(bytes);
+  if (mimeType.toLowerCase().includes("image/svg")) return stripSvgMetadata(bytes);
+  return concatByteArrays([bytes]);
+}
+
+function mimeTypeFromFormat(format: string, fallback: string): string {
+  if (format === "JPEG") return "image/jpeg";
+  if (format === "PNG") return "image/png";
+  if (format === "WebP") return "image/webp";
+  if (format === "GIF") return "image/gif";
+  if (format === "AVIF") return "image/avif";
+  return fallback || "image/png";
+}
+
+async function decodeBlobToCanvas(file: Blob): Promise<HTMLCanvasElement> {
+  if (typeof document === "undefined") {
+    throw new Error("This environment cannot render an image canvas.");
+  }
+
+  const probeCanvas = document.createElement("canvas");
+  const probeContext = probeCanvas.getContext("2d");
+  if (!probeContext || typeof probeCanvas.toBlob !== "function") {
     throw new Error("This browser cannot create a clean image copy.");
   }
-  context.drawImage(image, 0, 0);
-  image.close();
-  const supportedType = ["image/jpeg", "image/png", "image/webp"].includes(mimeType)
-    ? mimeType
-    : "image/png";
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => {
-        if (blob) resolve(blob);
-        else reject(new Error("The clean image copy could not be created."));
-      },
-      supportedType,
-      supportedType === "image/jpeg" ? 0.96 : 1,
-    );
-  });
+
+  if (typeof createImageBitmap === "function") {
+    try {
+      const bitmap = await createImageBitmap(file);
+      probeCanvas.width = bitmap.width;
+      probeCanvas.height = bitmap.height;
+      probeContext.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      return probeCanvas;
+    } catch {
+      // Fall back to HTMLImageElement decoding below when createImageBitmap rejects a valid format.
+    }
+  }
+
+  if (typeof Image === "undefined" || typeof URL.createObjectURL !== "function") {
+    throw new Error("This browser cannot decode the image locally.");
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const element = new Image();
+      const timeoutId = setTimeout(() => {
+        element.onload = null;
+        element.onerror = null;
+        reject(new Error("Image decoding timed out."));
+      }, 10_000);
+      element.onload = () => {
+        clearTimeout(timeoutId);
+        resolve(element);
+      };
+      element.onerror = () => {
+        clearTimeout(timeoutId);
+        reject(new Error("This image could not be decoded locally."));
+      };
+      element.src = objectUrl;
+    });
+    probeCanvas.width = img.naturalWidth || img.width;
+    probeCanvas.height = img.naturalHeight || img.height;
+    if (probeCanvas.width <= 0 || probeCanvas.height <= 0) {
+      throw new Error("This browser cannot create a clean image copy.");
+    }
+    probeContext.drawImage(img, 0, 0);
+    return probeCanvas;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+export async function createMetadataFreeCopy(file: Blob, mimeType: string): Promise<Blob> {
+  const normalizedInputType =
+    (mimeType || file.type || "").split(";")[0]?.trim().toLowerCase() ?? "";
+  const targetType =
+    normalizedInputType === "image/jpeg" || normalizedInputType === "image/jpg"
+      ? "image/jpeg"
+      : normalizedInputType === "image/webp"
+        ? "image/webp"
+        : "image/png";
+
+  const canvas = await decodeBlobToCanvas(file);
+  let encodedBlob: Blob;
+  try {
+    encodedBlob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error("The clean image copy could not be created."));
+        },
+        targetType,
+        targetType === "image/png" ? 1 : 0.95,
+      );
+    });
+  } finally {
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+
+  const encodedBytes = await readBlobBytes(encodedBlob);
+  const actualFormat = detectImageFormat(encodedBytes, encodedBlob.type || targetType);
+  const actualMime = mimeTypeFromFormat(actualFormat, encodedBlob.type || targetType);
+  const strippedBytes = stripImageContainerMetadata(encodedBytes, actualMime);
+  return new Blob([strippedBytes], { type: actualMime });
+}
+
+export async function sanitizeImageBytes(
+  bytes: Uint8Array,
+  contentType = "",
+): Promise<{ bytes: Uint8Array<ArrayBuffer>; mimeType: string; reencoded: boolean }> {
+  const normalizedType = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  const detectedFormat = detectImageFormat(bytes, normalizedType);
+  const resolvedMime = mimeTypeFromFormat(detectedFormat, normalizedType);
+
+  if (normalizedType.includes("image/svg")) {
+    return {
+      bytes: stripSvgMetadata(bytes),
+      mimeType: "image/svg+xml",
+      reencoded: false,
+    };
+  }
+
+  try {
+    const sourceBlob = new Blob([concatByteArrays([bytes])], { type: resolvedMime });
+    const cleanBlob = await createMetadataFreeCopy(sourceBlob, resolvedMime);
+    const cleanBytes = await readBlobBytes(cleanBlob);
+    const finalFormat = detectImageFormat(cleanBytes, cleanBlob.type || resolvedMime);
+    return {
+      bytes: cleanBytes,
+      mimeType: mimeTypeFromFormat(finalFormat, cleanBlob.type || resolvedMime),
+      reencoded: true,
+    };
+  } catch {
+    const stripped = stripImageContainerMetadata(bytes, resolvedMime);
+    const finalFormat = detectImageFormat(stripped, resolvedMime);
+    return {
+      bytes: stripped,
+      mimeType: mimeTypeFromFormat(finalFormat, resolvedMime),
+      reencoded: false,
+    };
+  }
 }
 
 export function downloadImage(blob: Blob, filename: string): void {

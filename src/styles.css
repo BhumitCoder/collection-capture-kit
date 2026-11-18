@@ -1007,6 +1007,175 @@
 .download-nudge > span svg {
   width: 15px;
   height: 15px;
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+.clean-export-control {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  overflow: hidden;
+  transition:
+    border-color 150ms ease,
+    background 150ms ease;
+}
+.clean-export-control.is-active {
+  border-color: color-mix(in oklch, var(--primary) 42%, var(--border));
+  background: color-mix(in oklch, var(--accent) 68%, var(--card));
+}
+.clean-toggle-button,
+.clean-options-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+.clean-toggle-button {
+  gap: 6px;
+  padding: 0 9px;
+}
+.clean-toggle-button svg {
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+}
+.clean-export-control.is-active .clean-toggle-button svg {
+  color: var(--primary);
+}
+.clean-options-trigger {
+  width: 30px;
+  border-left: 1px solid var(--border);
+  padding: 0;
+  color: var(--muted-foreground);
+}
+.clean-export-control.is-active .clean-options-trigger {
+  border-left-color: color-mix(in oklch, var(--primary) 26%, var(--border));
+  color: var(--primary);
+}
+.clean-toggle-button:hover:not(:disabled),
+.clean-options-trigger:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--accent) 75%, transparent);
+}
+.clean-toggle-button:disabled,
+.clean-options-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.clean-options-trigger svg {
+  width: 13px;
+  height: 13px;
+}
+.clean-state-pill {
+  border-radius: 2px;
+  background: var(--muted);
+  padding: 1px 5px;
+  color: var(--muted-foreground);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.clean-export-control.is-active .clean-state-pill {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+.clean-popover {
+  width: min(390px, calc(100vw - 24px));
+  padding: 16px;
+}
+.clean-popover-head h3 {
+  margin: 5px 0 5px;
+  font-family: Georgia, serif;
+  font-size: 17px;
+  font-weight: 400;
+  color: var(--foreground);
+}
+.clean-popover-head p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.clean-option-list {
+  display: grid;
+  gap: 8px;
+  margin: 13px 0;
+}
+.clean-option-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklch, var(--background) 60%, var(--card));
+  padding: 9px 10px;
+  cursor: pointer;
+  transition: border-color 150ms ease;
+}
+.clean-option-row:hover {
+  border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
+}
+.clean-option-row input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  flex: 0 0 auto;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.clean-option-row > span {
+  display: grid;
+  gap: 3px;
+}
+.clean-option-row strong {
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+.clean-option-row small {
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+.clean-option-row code {
+  border-radius: 3px;
+  background: var(--muted);
+  padding: 0 4px;
+  font-size: 10px;
+  color: var(--foreground);
+}
+.clean-popover-actions {
+  display: flex;
+  gap: 6px;
+  padding-top: 2px;
+}
+.clean-popover-actions button {
+  flex: 1;
+}
+.clean-popover-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 11px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.clean-popover-note svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  margin-top: 1px;
   color: var(--primary);
 }
 
@@ -1526,6 +1695,7 @@
   }
   .dock-actions {
     flex: 1;
+    flex-wrap: wrap;
     justify-content: flex-end;
   }
   .dock-actions button {
@@ -1533,6 +1703,18 @@
     padding-right: 8px;
     padding-left: 8px;
     font-size: 10px;
+  }
+  .clean-toggle-button {
+    min-height: 34px;
+    padding-right: 7px;
+    padding-left: 7px;
+    font-size: 10px;
+  }
+  .clean-options-trigger {
+    width: 30px;
+    min-height: 34px;
+    padding-right: 0;
+    padding-left: 0;
   }
   .export-progress {
     order: 3;
@@ -1542,12 +1724,13 @@
     right: 8px;
     bottom: 8px;
     left: 8px;
+    flex-wrap: wrap;
+    gap: 7px;
     padding: 8px;
   }
   .download-nudge > span {
-    flex: 0 1 auto;
-    font-size: 9px;
-    white-space: nowrap;
+    flex: 1 1 100%;
+    font-size: 9.5px;
   }
   .download-nudge button {
     min-height: 34px;

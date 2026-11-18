@@ -1,12 +1,15 @@
 import JSZip from "jszip";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { extractImageStructure } from "@/lib/image-forensics";
 import {
   createProductsArchive,
+  FULL_CLEAN_OPTIONS,
   getBestMp4Source,
   getHighResolutionImageUrl,
   getProductAssets,
   getStoreOrigin,
+  NEUTRAL_ZIP_DATE,
   safeAssetName,
   type ShopifyCollection,
   type ShopifyProductDetail,
@@ -164,5 +167,121 @@ describe("shopify storefront helpers", () => {
     expect(productJson.productType).toBe("Engagement Ring");
     expect(productJson.media[0]?.path).toBe("images/01-radiant-halo-ring.webp");
     expect(productJson.media[0]?.downloaded).toBe(true);
+  });
+
+  it("cleans image metadata, filenames, JSON footprints, and ZIP dates when FULL_CLEAN_OPTIONS is enabled", async () => {
+    const collection: ShopifyCollection = {
+      id: 10,
+      title: "Engagement Rings",
+      handle: "engagement-rings",
+      products_count: 1,
+      image: { src: "https://cdn.shopify.com/s/files/1/stienhardt-cover.jpg" },
+    };
+
+    const detailPayload: ShopifyProductDetail = {
+      id: 101,
+      title: "Radiant Halo Ring",
+      handle: "stienhardt-radiant-halo-ring",
+      vendor: "Stienhardt",
+      type: "Engagement Ring",
+      media: [
+        {
+          id: 1,
+          media_type: "image",
+          src: "//cdn.shopify.com/s/files/1/stienhardt-halo_800x.jpg",
+        },
+        {
+          id: 2,
+          media_type: "video",
+          sources: [{ format: "mp4", height: 1080, url: "//cdn.shopify.com/v/halo-1080.mp4" }],
+        },
+      ],
+    };
+
+    // JPEG containing EXIF (APP1), C2PA (APP11), Photoshop (APP13), Comment (COM), and trailing bytes
+    const dirtyJpeg = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xe1, 0x00, 0x06, 0x45, 0x78, 0x69, 0x66, 0xff, 0xeb, 0x00, 0x06, 0x63,
+      0x32, 0x70, 0x61, 0xff, 0xed, 0x00, 0x05, 0x50, 0x53, 0x44, 0xff, 0xfe, 0x00, 0x05, 0x73,
+      0x65, 0x63, 0xff, 0xda, 0x00, 0x04, 0x01, 0x00, 0x11, 0x22, 0xff, 0xd9, 0x99, 0x88,
+    ]);
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith("/api/shopify?")) {
+        return new Response(JSON.stringify(detailPayload), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("halo-1080.mp4")) {
+        return new Response(new Uint8Array([4, 5, 6]), {
+          status: 200,
+          headers: { "Content-Type": "video/mp4" },
+        });
+      }
+      return new Response(dirtyJpeg, {
+        status: 200,
+        headers: { "Content-Type": "image/jpeg" },
+      });
+    });
+
+    const { blob, result } = await createProductsArchive(
+      "https://stienhardt.com",
+      collection,
+      [{ id: 101, title: "Radiant Halo Ring", handle: "stienhardt-radiant-halo-ring", images: [] }],
+      () => {},
+      undefined,
+      FULL_CLEAN_OPTIONS,
+    );
+
+    expect(result).toEqual({ files: 3, skipped: 0, products: 1, cleanedImages: 2 });
+
+    const zipBytes = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(blob);
+    });
+    const archive = await JSZip.loadAsync(zipBytes);
+    const files = Object.keys(archive.files).filter((name) => !archive.files[name]?.dir);
+
+    // Neutral filenames with zero store/collection/product handle leakage
+    expect(files.sort()).toEqual([
+      "clean-media/cover.jpg",
+      "clean-media/item-01/images/image-01.jpg",
+      "clean-media/item-01/videos/video-01.mp4",
+    ]);
+    expect(files.some((name) => name.includes("stienhardt") || name.includes("engagement"))).toBe(
+      false,
+    );
+    expect(files.some((name) => name.endsWith(".json"))).toBe(false);
+
+    // Every image in the ZIP is stripped of EXIF, C2PA, Photoshop, comments & trailing bytes
+    const productImageBytes = await archive
+      .file("clean-media/item-01/images/image-01.jpg")
+      ?.async("uint8array");
+    expect(productImageBytes).toBeDefined();
+    const productStructure = extractImageStructure(productImageBytes!, "JPEG");
+    expect(productStructure.map((s) => s.name)).toEqual([
+      "SOI · Start of image",
+      "Image scan data",
+      "EOI · End of image",
+    ]);
+
+    const coverBytes = await archive.file("clean-media/cover.jpg")?.async("uint8array");
+    expect(coverBytes).toBeDefined();
+    const coverStructure = extractImageStructure(coverBytes!, "JPEG");
+    expect(coverStructure.map((s) => s.name)).toEqual([
+      "SOI · Start of image",
+      "Image scan data",
+      "EOI · End of image",
+    ]);
+
+    // ZIP entry timestamps neutralized
+    for (const entry of Object.values(archive.files)) {
+      expect(entry.date.getUTCFullYear()).toBe(NEUTRAL_ZIP_DATE.getUTCFullYear());
+      expect(entry.date.getUTCMonth()).toBe(NEUTRAL_ZIP_DATE.getUTCMonth());
+      expect(entry.date.getUTCDate()).toBe(NEUTRAL_ZIP_DATE.getUTCDate());
+    }
   });
 });
