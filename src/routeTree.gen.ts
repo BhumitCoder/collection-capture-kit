@@ -10,33 +10,63 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as InspectRouteImport } from './routes/inspect'
+import { Route as ApiMediaRouteImport } from './routes/api/media'
+import { Route as ApiShopifyRouteImport } from './routes/api/shopify'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const InspectRoute = InspectRouteImport.update({
+  id: '/inspect',
+  path: '/inspect',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiMediaRoute = ApiMediaRouteImport.update({
+  id: '/api/media',
+  path: '/api/media',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiShopifyRoute = ApiShopifyRouteImport.update({
+  id: '/api/shopify',
+  path: '/api/shopify',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/inspect': typeof InspectRoute
+  '/api/media': typeof ApiMediaRoute
+  '/api/shopify': typeof ApiShopifyRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/inspect': typeof InspectRoute
+  '/api/media': typeof ApiMediaRoute
+  '/api/shopify': typeof ApiShopifyRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/inspect': typeof InspectRoute
+  '/api/media': typeof ApiMediaRoute
+  '/api/shopify': typeof ApiShopifyRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths: '/' | '/inspect' | '/api/media' | '/api/shopify'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/' | '/inspect' | '/api/media' | '/api/shopify'
+  id: '__root__' | '/' | '/inspect' | '/api/media' | '/api/shopify'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  InspectRoute: typeof InspectRoute
+  ApiMediaRoute: typeof ApiMediaRoute
+  ApiShopifyRoute: typeof ApiShopifyRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +78,35 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/inspect': {
+      id: '/inspect'
+      path: '/inspect'
+      fullPath: '/inspect'
+      preLoaderRoute: typeof InspectRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/media': {
+      id: '/api/media'
+      path: '/api/media'
+      fullPath: '/api/media'
+      preLoaderRoute: typeof ApiMediaRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/shopify': {
+      id: '/api/shopify'
+      path: '/api/shopify'
+      fullPath: '/api/shopify'
+      preLoaderRoute: typeof ApiShopifyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  InspectRoute: InspectRoute,
+  ApiMediaRoute: ApiMediaRoute,
+  ApiShopifyRoute: ApiShopifyRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

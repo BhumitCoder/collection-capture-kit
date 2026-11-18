@@ -1,0 +1,21 @@
+{
+  "name": "Studio Vault",
+  "short_name": "Studio Vault",
+  "description": "Shopify collection media exporter and browser-local image metadata inspector.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8faf8",
+  "theme_color": "#184737",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ]
+}
