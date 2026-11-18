@@ -1,6 +1,33 @@
 import type JSZip from "jszip";
 
-import { sanitizeImageBytes } from "@/lib/image-forensics";
+import {
+  buildAdLaunchPlaybook,
+  buildGoogleAdsCsv,
+  buildMetaAdsCsv,
+  buildNegativeKeywordsText,
+  buildProductAdKitRecord,
+  buildWhatsappConciergeScripts,
+  detectJewelryAttributes,
+  formatCreativeSubline,
+  type ProductAdKitRecord,
+} from "@/lib/ad-growth-kit";
+import {
+  renderLuxuryAdCreative,
+  sanitizeImageBytes,
+  type ImageFrameMode,
+  type ImageOutputFormat,
+  type ImageTransformOptions,
+} from "@/lib/image-forensics";
+import {
+  buildProductSeoRecord,
+  buildSeoKitCsv,
+  DEFAULT_BRAND_SEO,
+  normalizeBrandDomain,
+  normalizeBrandName,
+  slugifySeo,
+  stripSourceBrandText,
+  type ProductSeoRecord,
+} from "@/lib/seo-kit";
 
 const envDefaultStore =
   typeof import.meta !== "undefined" && import.meta.env?.["VITE_DEFAULT_STORE_URL"]
@@ -72,10 +99,20 @@ export type ExportProgress = {
   label: string;
 };
 
+export type ArchiveFilenameMode = "original" | "neutral" | "seo";
+
 export type ArchiveCleanOptions = {
   stripImageMetadata: boolean;
   cleanFilenames: boolean;
   removeSourceFootprint: boolean;
+  outputFormat?: ImageOutputFormat | undefined;
+  maxDimension?: number | undefined;
+  frameMode?: ImageFrameMode | undefined;
+  filenameMode?: ArchiveFilenameMode | undefined;
+  includeSeoKit?: boolean | undefined;
+  includeAdGrowthKit?: boolean | undefined;
+  brandName?: string | undefined;
+  brandDomain?: string | undefined;
 };
 
 export const FULL_CLEAN_OPTIONS: ArchiveCleanOptions = {
@@ -84,10 +121,32 @@ export const FULL_CLEAN_OPTIONS: ArchiveCleanOptions = {
   removeSourceFootprint: true,
 };
 
+export const DEFAULT_SEO_CLEAN_OPTIONS: ArchiveCleanOptions = {
+  stripImageMetadata: true,
+  cleanFilenames: true,
+  removeSourceFootprint: true,
+  outputFormat: "webp",
+  maxDimension: 1600,
+  frameMode: "original",
+  filenameMode: "seo",
+  includeSeoKit: true,
+  includeAdGrowthKit: true,
+  brandName: DEFAULT_BRAND_SEO.brandName,
+  brandDomain: DEFAULT_BRAND_SEO.brandDomain,
+};
+
 export const NO_CLEAN_OPTIONS: ArchiveCleanOptions = {
   stripImageMetadata: false,
   cleanFilenames: false,
   removeSourceFootprint: false,
+  outputFormat: "original",
+  maxDimension: 0,
+  frameMode: "original",
+  filenameMode: "original",
+  includeSeoKit: false,
+  includeAdGrowthKit: false,
+  brandName: DEFAULT_BRAND_SEO.brandName,
+  brandDomain: DEFAULT_BRAND_SEO.brandDomain,
 };
 
 export const NEUTRAL_ZIP_DATE = new Date(Date.UTC(2000, 0, 1, 0, 0, 0));
@@ -97,7 +156,30 @@ export type ExportResult = {
   skipped: number;
   products: number;
   cleanedImages?: number;
+  seoKitIncluded?: boolean;
+  adKitIncluded?: boolean;
+  adCreativesCreated?: number;
 };
+
+export function resolveFilenameMode(options?: Partial<ArchiveCleanOptions>): ArchiveFilenameMode {
+  if (options?.filenameMode) return options.filenameMode;
+  return options?.cleanFilenames ? "neutral" : "original";
+}
+
+export function getArchiveDownloadFilename(
+  collectionHandle: string,
+  options?: Partial<ArchiveCleanOptions>,
+): string {
+  const mode = resolveFilenameMode(options);
+  if (mode === "seo") {
+    const brandSlug = slugifySeo(normalizeBrandName(options?.brandName ?? ""), 32);
+    return `${brandSlug}-seo-export.zip`;
+  }
+  if (mode === "neutral") {
+    return "studio-export-clean.zip";
+  }
+  return `${safeAssetName(collectionHandle)}-media.zip`;
+}
 
 const LEGACY_SHOPIFY_SIZE_SUFFIX =
   /(?:_(?:pico|icon|thumb|small|compact|medium|large|grande|master|\d+x\d*|x\d+)(?:_crop_(?:top|center|bottom|left|right))?(?:@[23]x)?)(?=\.[a-zA-Z0-9]{2,5}$)/i;
@@ -321,7 +403,7 @@ export async function fetchProductDetail(
 export function getProductAssets(
   detail: ShopifyProductDetail,
   store: string,
-  cleanFilenames = false,
+  cleanFilenames: boolean | { mode: ArchiveFilenameMode; seoPrefix?: string } = false,
 ): ProductAsset[] {
   const origin = getStoreOrigin(store);
   const imageUrls = new Set<string>();
@@ -352,25 +434,45 @@ export function getProductAssets(
     }
   }
 
+  const mode: ArchiveFilenameMode =
+    typeof cleanFilenames === "boolean"
+      ? cleanFilenames
+        ? "neutral"
+        : "original"
+      : cleanFilenames.mode;
+  const seoPrefix =
+    typeof cleanFilenames === "object" && cleanFilenames.seoPrefix
+      ? cleanFilenames.seoPrefix
+      : safeAssetName(detail.handle);
   const slug = safeAssetName(detail.handle);
+
   const imageAssets: ProductAsset[] = Array.from(imageUrls).map((url, index) => {
     const seq = String(index + 1).padStart(2, "0");
+    const ext = extensionFor(url);
+    const path =
+      mode === "seo"
+        ? `images/${seoPrefix}-${seq}.${ext}`
+        : mode === "neutral"
+          ? `images/image-${seq}.${ext}`
+          : `images/${seq}-${slug}.${ext}`;
     return {
       url,
-      path: cleanFilenames
-        ? `images/image-${seq}.${extensionFor(url)}`
-        : `images/${seq}-${slug}.${extensionFor(url)}`,
+      path,
       label: `Image ${index + 1}`,
       kind: "image",
     };
   });
   const videoAssets: ProductAsset[] = videos.map((video, index) => {
     const seq = String(index + 1).padStart(2, "0");
+    const path =
+      mode === "seo"
+        ? `videos/${seoPrefix}-${seq}.mp4`
+        : mode === "neutral"
+          ? `videos/video-${seq}.mp4`
+          : `videos/${seq}-${slug}${video.height > 0 ? `-${video.height}p` : ""}.mp4`;
     return {
       url: video.url,
-      path: cleanFilenames
-        ? `videos/video-${seq}.mp4`
-        : `videos/${seq}-${slug}${video.height > 0 ? `-${video.height}p` : ""}.mp4`,
+      path,
       label: video.height > 0 ? `Video ${index + 1} · ${video.height}p` : `Video ${index + 1}`,
       kind: "video",
     };
@@ -426,10 +528,12 @@ async function addRemoteFile(
   options: {
     kind: "image" | "video";
     stripImageMetadata: boolean;
+    imageTransform?: ImageTransformOptions | undefined;
     neutralizeDate: boolean;
+    returnBytes?: boolean;
     signal?: AbortSignal | undefined;
   },
-): Promise<{ path: string; cleaned: boolean }> {
+): Promise<{ path: string; cleaned: boolean; bytes?: Uint8Array; contentType?: string }> {
   const { bytes, contentType } = await fetchMediaBytes(url, options.signal);
   throwIfAborted(options.signal);
 
@@ -437,8 +541,14 @@ async function addRemoteFile(
   let finalContentType = contentType;
   let cleaned = false;
 
-  if (options.kind === "image" && options.stripImageMetadata) {
-    const sanitized = await sanitizeImageBytes(bytes, contentType);
+  const hasTransform =
+    options.imageTransform &&
+    ((options.imageTransform.outputFormat && options.imageTransform.outputFormat !== "original") ||
+      (options.imageTransform.maxDimension && options.imageTransform.maxDimension > 0) ||
+      (options.imageTransform.frameMode && options.imageTransform.frameMode !== "original"));
+
+  if (options.kind === "image" && (options.stripImageMetadata || hasTransform)) {
+    const sanitized = await sanitizeImageBytes(bytes, contentType, options.imageTransform);
     throwIfAborted(options.signal);
     finalBytes = sanitized.bytes;
     finalContentType = sanitized.mimeType;
@@ -451,7 +561,9 @@ async function addRemoteFile(
     finalBytes,
     options.neutralizeDate ? { date: NEUTRAL_ZIP_DATE } : undefined,
   );
-  return { path: resolvedPath, cleaned };
+  return options.returnBytes
+    ? { path: resolvedPath, cleaned, bytes: finalBytes, contentType: finalContentType }
+    : { path: resolvedPath, cleaned };
 }
 
 async function runWithConcurrency<T>(
@@ -483,19 +595,50 @@ export async function createProductsArchive(
   signal?: AbortSignal,
   cleanOptions?: Partial<ArchiveCleanOptions>,
 ): Promise<{ blob: Blob; result: ExportResult }> {
+  const filenameMode = resolveFilenameMode(cleanOptions);
+  const brandName = normalizeBrandName(cleanOptions?.brandName ?? "");
+  const brandDomain = normalizeBrandDomain(cleanOptions?.brandDomain ?? "");
+  const brandSlug = slugifySeo(brandName, 28);
+  const includeSeoKit = Boolean(cleanOptions?.includeSeoKit);
+  const includeAdGrowthKit = Boolean(cleanOptions?.includeAdGrowthKit);
+  const imageTransform: ImageTransformOptions | undefined =
+    cleanOptions?.outputFormat || cleanOptions?.maxDimension || cleanOptions?.frameMode
+      ? {
+          outputFormat: cleanOptions.outputFormat ?? "original",
+          maxDimension: cleanOptions.maxDimension ?? 0,
+          frameMode: cleanOptions.frameMode ?? "original",
+        }
+      : undefined;
+
   const clean: ArchiveCleanOptions = {
     stripImageMetadata: Boolean(cleanOptions?.stripImageMetadata),
-    cleanFilenames: Boolean(cleanOptions?.cleanFilenames),
+    cleanFilenames: filenameMode !== "original",
     removeSourceFootprint: Boolean(cleanOptions?.removeSourceFootprint),
+    outputFormat: imageTransform?.outputFormat,
+    maxDimension: imageTransform?.maxDimension,
+    frameMode: imageTransform?.frameMode,
+    filenameMode,
+    includeSeoKit,
+    includeAdGrowthKit,
+    brandName,
+    brandDomain,
   };
 
   const origin = getStoreOrigin(store);
   const { default: JSZip } = await import("jszip");
   const zip = new JSZip();
-  const collectionFolder = clean.cleanFilenames ? "clean-media" : safeAssetName(collection.handle);
+  const collectionFolder =
+    filenameMode === "seo"
+      ? brandSlug
+      : filenameMode === "neutral"
+        ? "clean-media"
+        : safeAssetName(collection.handle);
   let completedFiles = 0;
   let skippedFiles = 0;
   let cleanedImages = 0;
+  let adCreativesCreated = 0;
+  const seoRecords: ProductSeoRecord[] = [];
+  const adKitRecords: ProductAdKitRecord[] = [];
 
   const uniqueProducts: ShopifyProductSummary[] = [];
   const seenHandles = new Set<string>();
@@ -508,20 +651,15 @@ export async function createProductsArchive(
 
   const folderPadWidth = Math.max(2, String(uniqueProducts.length).length);
   const usedFolderNames = new Set<string>();
-  const reserveProductFolder = (handle: string, index: number): string => {
-    if (clean.cleanFilenames) {
-      const seq = String(index + 1).padStart(folderPadWidth, "0");
-      return `${collectionFolder}/item-${seq}`;
-    }
-    const base = safeAssetName(handle);
-    let candidate = base;
+  const reserveUniqueSlug = (base: string): string => {
+    let candidate = base || "item";
     let suffix = 2;
     while (usedFolderNames.has(candidate)) {
       candidate = `${base}-${suffix}`;
       suffix += 1;
     }
     usedFolderNames.add(candidate);
-    return `${collectionFolder}/products/${candidate}`;
+    return candidate;
   };
 
   for (let productIndex = 0; productIndex < uniqueProducts.length; productIndex += 1) {
@@ -539,8 +677,35 @@ export async function createProductsArchive(
 
     try {
       const detail = await fetchProductDetail(origin, summary.handle, signal);
-      const productFolder = reserveProductFolder(summary.handle, productIndex);
-      const assets = getProductAssets(detail, origin, clean.cleanFilenames);
+      const sourceVendor = detail.vendor ?? summary.vendor ?? null;
+      const cleanSeoTitle = stripSourceBrandText(detail.title, sourceVendor, origin);
+      const seoBaseHandle = slugifySeo(cleanSeoTitle, 52);
+
+      let productFolder: string;
+      let folderRelativeName: string;
+      let seoHandle: string;
+
+      if (filenameMode === "seo") {
+        seoHandle = reserveUniqueSlug(seoBaseHandle);
+        folderRelativeName = seoHandle;
+        productFolder = `${collectionFolder}/${seoHandle}`;
+      } else if (filenameMode === "neutral") {
+        const seq = String(productIndex + 1).padStart(folderPadWidth, "0");
+        seoHandle = seoBaseHandle;
+        folderRelativeName = `item-${seq}`;
+        productFolder = `${collectionFolder}/${folderRelativeName}`;
+      } else {
+        const uniqueOriginal = reserveUniqueSlug(safeAssetName(summary.handle));
+        seoHandle = seoBaseHandle;
+        folderRelativeName = `products/${uniqueOriginal}`;
+        productFolder = `${collectionFolder}/${folderRelativeName}`;
+      }
+
+      const seoFilePrefix = slugifySeo(`${brandSlug}-${seoHandle}`, 60);
+      const assets = getProductAssets(detail, origin, {
+        mode: filenameMode,
+        seoPrefix: seoFilePrefix,
+      });
       const recordedMedia: Array<{
         path: string;
         url: string;
@@ -549,21 +714,33 @@ export async function createProductsArchive(
         downloaded: boolean;
       }> = new Array(assets.length);
 
+      let primaryImageSample: { bytes: Uint8Array; contentType: string; path: string } | null =
+        null;
       let processedAssets = 0;
       await runWithConcurrency(
         assets,
         ASSET_DOWNLOAD_CONCURRENCY,
         async (asset, assetIndex) => {
           try {
+            const capturePrimary = includeAdGrowthKit && asset.kind === "image" && assetIndex === 0;
             const saved = await addRemoteFile(zip, asset.url, `${productFolder}/${asset.path}`, {
               kind: asset.kind,
               stripImageMetadata: clean.stripImageMetadata,
+              imageTransform,
               neutralizeDate: clean.removeSourceFootprint,
+              returnBytes: capturePrimary,
               signal,
             });
             const savedRelativePath = saved.path.startsWith(`${productFolder}/`)
               ? saved.path.slice(productFolder.length + 1)
               : asset.path;
+            if (capturePrimary && saved.bytes) {
+              primaryImageSample = {
+                bytes: saved.bytes,
+                contentType: saved.contentType ?? "image/jpeg",
+                path: `${folderRelativeName}/${savedRelativePath}`,
+              };
+            }
             recordedMedia[assetIndex] = {
               path: savedRelativePath,
               url: asset.url,
@@ -602,12 +779,102 @@ export async function createProductsArchive(
         signal,
       );
 
+      const downloadedImagePaths = recordedMedia
+        .filter((item): item is NonNullable<typeof item> =>
+          Boolean(item?.downloaded && item.kind === "image"),
+        )
+        .map((item) => item.path);
+
+      if (includeSeoKit) {
+        seoRecords.push(
+          buildProductSeoRecord({
+            rawTitle: detail.title,
+            rawProductType: detail.type ?? detail.product_type ?? summary.product_type ?? null,
+            sourceVendor,
+            storeOrigin: origin,
+            priceCents: detail.price ?? null,
+            folder: folderRelativeName,
+            seoHandle,
+            imagePaths: downloadedImagePaths,
+            brand: { brandName, brandDomain },
+          }),
+        );
+      }
+
+      if (includeAdGrowthKit) {
+        const cleanType = detail.type ?? detail.product_type ?? summary.product_type ?? null;
+        const attributes = detectJewelryAttributes(cleanSeoTitle, cleanType, detail.description);
+        const creativeSubline = formatCreativeSubline(attributes);
+        const zipOpts = clean.removeSourceFootprint ? { date: NEUTRAL_ZIP_DATE } : undefined;
+        let metaFeedRelPath = "";
+        let storyRelPath = "";
+
+        if (primaryImageSample !== null) {
+          const sample: { bytes: Uint8Array; contentType: string; path: string } =
+            primaryImageSample;
+          const creativeBase = filenameMode === "neutral" ? "creative" : seoFilePrefix;
+
+          const feedCard = await renderLuxuryAdCreative(sample.bytes, sample.contentType, {
+            variant: "meta-feed-4x5",
+            brandName,
+            brandDomain,
+            productTitle: cleanSeoTitle,
+            subline: creativeSubline,
+            outputFormat: imageTransform?.outputFormat,
+          });
+          throwIfAborted(signal);
+          if (feedCard) {
+            const ext = extensionFor("", feedCard.mimeType);
+            const rel = `ad-creatives/${creativeBase}-meta-feed-4x5.${ext}`;
+            zip.file(`${productFolder}/${rel}`, feedCard.bytes, zipOpts);
+            metaFeedRelPath = `${folderRelativeName}/${rel}`;
+            adCreativesCreated += 1;
+          }
+
+          const storyCard = await renderLuxuryAdCreative(sample.bytes, sample.contentType, {
+            variant: "story-whatsapp-9x16",
+            brandName,
+            brandDomain,
+            productTitle: cleanSeoTitle,
+            subline: creativeSubline,
+            outputFormat: imageTransform?.outputFormat,
+          });
+          throwIfAborted(signal);
+          if (storyCard) {
+            const ext = extensionFor("", storyCard.mimeType);
+            const rel = `ad-creatives/${creativeBase}-story-9x16.${ext}`;
+            zip.file(`${productFolder}/${rel}`, storyCard.bytes, zipOpts);
+            storyRelPath = `${folderRelativeName}/${rel}`;
+            adCreativesCreated += 1;
+          }
+        }
+
+        const primaryCleanImage = downloadedImagePaths[0]
+          ? `${folderRelativeName}/${downloadedImagePaths[0]}`
+          : "";
+        adKitRecords.push(
+          buildProductAdKitRecord({
+            rawTitle: detail.title,
+            rawProductType: cleanType,
+            rawDescription: detail.description ?? null,
+            sourceVendor,
+            storeOrigin: origin,
+            folder: folderRelativeName,
+            seoHandle,
+            primaryImageFile: primaryCleanImage,
+            metaFeedCreative: metaFeedRelPath || primaryCleanImage,
+            storyCreative: storyRelPath || primaryCleanImage,
+            brand: { brandName, brandDomain },
+          }),
+        );
+      }
+
       if (!clean.removeSourceFootprint) {
         const productRecord = {
           id: detail.id,
           title: detail.title,
           handle: detail.handle,
-          vendor: detail.vendor ?? summary.vendor ?? null,
+          vendor: sourceVendor,
           productType: detail.type ?? detail.product_type ?? summary.product_type ?? null,
           description: detail.description ?? "",
           priceCents: detail.price ?? null,
@@ -631,13 +898,20 @@ export async function createProductsArchive(
   let coverFile: string | null = null;
   if (cover) {
     try {
+      const coverTarget =
+        filenameMode === "seo"
+          ? `${collectionFolder}/${brandSlug}-collection-cover.jpg`
+          : filenameMode === "neutral"
+            ? `${collectionFolder}/cover.jpg`
+            : `${collectionFolder}/collection-cover.jpg`;
       const savedCover = await addRemoteFile(
         zip,
         getHighResolutionImageUrl(cover, origin),
-        `${collectionFolder}/${clean.cleanFilenames ? "cover.jpg" : "collection-cover.jpg"}`,
+        coverTarget,
         {
           kind: "image",
           stripImageMetadata: clean.stripImageMetadata,
+          imageTransform,
           neutralizeDate: clean.removeSourceFootprint,
           signal,
         },
@@ -651,6 +925,59 @@ export async function createProductsArchive(
       }
       skippedFiles += 1;
     }
+  }
+
+  if (includeSeoKit && seoRecords.length > 0) {
+    const zipOpts = clean.removeSourceFootprint ? { date: NEUTRAL_ZIP_DATE } : undefined;
+    zip.file(`${collectionFolder}/seo-kit/seo-import.csv`, buildSeoKitCsv(seoRecords), zipOpts);
+    zip.file(
+      `${collectionFolder}/seo-kit/product-schemas.json`,
+      JSON.stringify(
+        seoRecords.map((record) => ({
+          folder: record.folder,
+          handle: record.handle,
+          title: record.title,
+          metaTitle: record.metaTitle,
+          metaDescription: record.metaDescription,
+          targetUrl: record.targetUrl,
+          images: record.images,
+          jsonLd: record.jsonLd,
+        })),
+        null,
+        2,
+      ),
+      zipOpts,
+    );
+  }
+
+  if (includeAdGrowthKit && adKitRecords.length > 0) {
+    const zipOpts = clean.removeSourceFootprint ? { date: NEUTRAL_ZIP_DATE } : undefined;
+    const brandConfig = { brandName, brandDomain };
+    zip.file(
+      `${collectionFolder}/ad-growth-kit/START-HERE-AD-PLAYBOOK.md`,
+      buildAdLaunchPlaybook(brandConfig, adKitRecords.length),
+      zipOpts,
+    );
+    zip.file(
+      `${collectionFolder}/ad-growth-kit/meta-instagram-ads.csv`,
+      buildMetaAdsCsv(adKitRecords),
+      zipOpts,
+    );
+    zip.file(
+      `${collectionFolder}/ad-growth-kit/google-ads-keywords.csv`,
+      buildGoogleAdsCsv(adKitRecords),
+      zipOpts,
+    );
+    zip.file(
+      `${collectionFolder}/ad-growth-kit/google-ads-negative-keywords.txt`,
+      buildNegativeKeywordsText(),
+      zipOpts,
+    );
+    zip.file(
+      `${collectionFolder}/ad-growth-kit/whatsapp-vip-concierge-scripts.txt`,
+      buildWhatsappConciergeScripts(brandConfig),
+      zipOpts,
+    );
   }
 
   if (!clean.removeSourceFootprint) {
@@ -691,24 +1018,29 @@ export async function createProductsArchive(
         productCount: uniqueProducts.length,
         asset: Math.round(metadata.percent),
         assetCount: 100,
-        label: clean.stripImageMetadata ? "Packing cleaned archive" : "Packing product folders",
+        label: clean.stripImageMetadata ? "Packing cleaned SEO archive" : "Packing product folders",
       });
     },
   );
   throwIfAborted(signal);
 
-  const result: ExportResult = clean.stripImageMetadata
-    ? {
-        files: completedFiles,
-        skipped: skippedFiles,
-        products: uniqueProducts.length,
-        cleanedImages,
-      }
-    : {
-        files: completedFiles,
-        skipped: skippedFiles,
-        products: uniqueProducts.length,
-      };
+  const result: ExportResult =
+    clean.stripImageMetadata || includeSeoKit || includeAdGrowthKit
+      ? {
+          files: completedFiles,
+          skipped: skippedFiles,
+          products: uniqueProducts.length,
+          ...(clean.stripImageMetadata ? { cleanedImages } : {}),
+          ...(includeSeoKit ? { seoKitIncluded: seoRecords.length > 0 } : {}),
+          ...(includeAdGrowthKit
+            ? { adKitIncluded: adKitRecords.length > 0, adCreativesCreated }
+            : {}),
+        }
+      : {
+          files: completedFiles,
+          skipped: skippedFiles,
+          products: uniqueProducts.length,
+        };
 
   return { blob, result };
 }

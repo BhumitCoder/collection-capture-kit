@@ -981,32 +981,150 @@ async function decodeBlobToCanvas(file: Blob): Promise<HTMLCanvasElement> {
   }
 }
 
-export async function createMetadataFreeCopy(file: Blob, mimeType: string): Promise<Blob> {
+export type ImageOutputFormat = "original" | "webp" | "jpeg" | "png";
+export type ImageFrameMode = "original" | "square" | "portrait";
+
+export type ImageTransformOptions = {
+  outputFormat?: ImageOutputFormat | undefined;
+  maxDimension?: number | undefined;
+  frameMode?: ImageFrameMode | undefined;
+};
+
+function sampleStudioBackground(source: HTMLCanvasElement): string {
+  const ctx = source.getContext("2d", { willReadFrequently: true });
+  if (!ctx || source.width < 2 || source.height < 2) return "#ffffff";
+  const coords: Array<[number, number]> = [
+    [1, 1],
+    [source.width - 2, 1],
+    [1, source.height - 2],
+    [source.width - 2, source.height - 2],
+  ];
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  let opaqueCount = 0;
+  for (const [x, y] of coords) {
+    try {
+      const pixel = ctx.getImageData(x, y, 1, 1).data;
+      const alpha = pixel[3] ?? 0;
+      if (alpha >= 200) {
+        red += pixel[0] ?? 255;
+        green += pixel[1] ?? 255;
+        blue += pixel[2] ?? 255;
+        opaqueCount += 1;
+      }
+    } catch {
+      return "#ffffff";
+    }
+  }
+  if (opaqueCount === 0) return "#ffffff";
+  return `rgb(${Math.round(red / opaqueCount)}, ${Math.round(green / opaqueCount)}, ${Math.round(blue / opaqueCount)})`;
+}
+
+function renderTransformedCanvas(
+  source: HTMLCanvasElement,
+  targetMime: string,
+  options?: ImageTransformOptions,
+): HTMLCanvasElement {
+  const srcW = source.width;
+  const srcH = source.height;
+  const frameMode = options?.frameMode ?? "original";
+  const maxDim =
+    typeof options?.maxDimension === "number" && options.maxDimension > 0
+      ? options.maxDimension
+      : 0;
+
+  let targetW = srcW;
+  let targetH = srcH;
+  let drawX = 0;
+  let drawY = 0;
+  let drawW = srcW;
+  let drawH = srcH;
+  let needsFill = targetMime === "image/jpeg";
+
+  if (frameMode === "square" || frameMode === "portrait") {
+    const cap = maxDim > 0 ? maxDim : Math.min(2000, Math.max(srcW, srcH));
+    targetH = cap;
+    targetW = frameMode === "square" ? cap : Math.round(cap * 0.8);
+    // Keep clean 4% studio breathing room while ensuring the entire jewelry piece stays uncropped.
+    const innerW = Math.round(targetW * 0.92);
+    const innerH = Math.round(targetH * 0.92);
+    const scale = Math.min(innerW / srcW, innerH / srcH);
+    drawW = Math.max(1, Math.round(srcW * scale));
+    drawH = Math.max(1, Math.round(srcH * scale));
+    drawX = Math.round((targetW - drawW) / 2);
+    drawY = Math.round((targetH - drawH) / 2);
+    needsFill = true;
+  } else if (maxDim > 0 && Math.max(srcW, srcH) > maxDim) {
+    const scale = maxDim / Math.max(srcW, srcH);
+    targetW = Math.max(1, Math.round(srcW * scale));
+    targetH = Math.max(1, Math.round(srcH * scale));
+    drawW = targetW;
+    drawH = targetH;
+  }
+
+  if (targetW === srcW && targetH === srcH && drawX === 0 && drawY === 0 && !needsFill) {
+    return source;
+  }
+
+  const output = document.createElement("canvas");
+  output.width = targetW;
+  output.height = targetH;
+  const ctx = output.getContext("2d");
+  if (!ctx) {
+    return source;
+  }
+
+  if (needsFill) {
+    ctx.fillStyle = sampleStudioBackground(source);
+    ctx.fillRect(0, 0, targetW, targetH);
+  }
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(source, 0, 0, srcW, srcH, drawX, drawY, drawW, drawH);
+  return output;
+}
+
+function resolveTargetOutputMime(inputMime: string, outputFormat?: ImageOutputFormat): string {
+  if (outputFormat === "webp") return "image/webp";
+  if (outputFormat === "jpeg") return "image/jpeg";
+  if (outputFormat === "png") return "image/png";
+  if (inputMime === "image/jpeg" || inputMime === "image/jpg") return "image/jpeg";
+  if (inputMime === "image/webp") return "image/webp";
+  return "image/png";
+}
+
+export async function createMetadataFreeCopy(
+  file: Blob,
+  mimeType: string,
+  options?: ImageTransformOptions,
+): Promise<Blob> {
   const normalizedInputType =
     (mimeType || file.type || "").split(";")[0]?.trim().toLowerCase() ?? "";
-  const targetType =
-    normalizedInputType === "image/jpeg" || normalizedInputType === "image/jpg"
-      ? "image/jpeg"
-      : normalizedInputType === "image/webp"
-        ? "image/webp"
-        : "image/png";
+  const targetType = resolveTargetOutputMime(normalizedInputType, options?.outputFormat);
+  const quality = targetType === "image/png" ? 1 : targetType === "image/webp" ? 0.9 : 0.94;
 
-  const canvas = await decodeBlobToCanvas(file);
+  const sourceCanvas = await decodeBlobToCanvas(file);
+  const finalCanvas = renderTransformedCanvas(sourceCanvas, targetType, options);
   let encodedBlob: Blob;
   try {
     encodedBlob = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob(
+      finalCanvas.toBlob(
         (blob) => {
           if (blob) resolve(blob);
           else reject(new Error("The clean image copy could not be created."));
         },
         targetType,
-        targetType === "image/png" ? 1 : 0.95,
+        quality,
       );
     });
   } finally {
-    canvas.width = 0;
-    canvas.height = 0;
+    if (finalCanvas !== sourceCanvas) {
+      finalCanvas.width = 0;
+      finalCanvas.height = 0;
+    }
+    sourceCanvas.width = 0;
+    sourceCanvas.height = 0;
   }
 
   const encodedBytes = await readBlobBytes(encodedBlob);
@@ -1019,6 +1137,7 @@ export async function createMetadataFreeCopy(file: Blob, mimeType: string): Prom
 export async function sanitizeImageBytes(
   bytes: Uint8Array,
   contentType = "",
+  options?: ImageTransformOptions,
 ): Promise<{ bytes: Uint8Array<ArrayBuffer>; mimeType: string; reencoded: boolean }> {
   const normalizedType = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
   const detectedFormat = detectImageFormat(bytes, normalizedType);
@@ -1034,7 +1153,7 @@ export async function sanitizeImageBytes(
 
   try {
     const sourceBlob = new Blob([concatByteArrays([bytes])], { type: resolvedMime });
-    const cleanBlob = await createMetadataFreeCopy(sourceBlob, resolvedMime);
+    const cleanBlob = await createMetadataFreeCopy(sourceBlob, resolvedMime, options);
     const cleanBytes = await readBlobBytes(cleanBlob);
     const finalFormat = detectImageFormat(cleanBytes, cleanBlob.type || resolvedMime);
     return {
@@ -1050,6 +1169,458 @@ export async function sanitizeImageBytes(
       mimeType: mimeTypeFromFormat(finalFormat, resolvedMime),
       reencoded: false,
     };
+  }
+}
+
+export type LuxuryAdCreativeVariant = "meta-feed-4x5" | "story-whatsapp-9x16";
+
+export type LuxuryAdCreativeSpec = {
+  variant: LuxuryAdCreativeVariant;
+  brandName: string;
+  brandDomain: string;
+  productTitle: string;
+  subline: string;
+  outputFormat?: ImageOutputFormat | undefined;
+};
+
+function wrapCanvasLines(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  maxLines: number,
+): string[] {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  const lines: string[] = [];
+  let current = "";
+
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (ctx.measureText(candidate).width <= maxWidth || !current) {
+      current = candidate;
+    } else {
+      lines.push(current);
+      if (lines.length === maxLines - 1) {
+        current = word;
+        break;
+      }
+      current = word;
+    }
+  }
+  if (current) lines.push(current);
+
+  if (lines.length > maxLines) {
+    lines.length = maxLines;
+  }
+  const lastIndex = lines.length - 1;
+  const lastLine = lines[lastIndex];
+  if (lastLine && ctx.measureText(lastLine).width > maxWidth) {
+    let trimmed = lastLine;
+    while (trimmed.length > 3 && ctx.measureText(`${trimmed}…`).width > maxWidth) {
+      trimmed = trimmed.slice(0, -1);
+    }
+    lines[lastIndex] = `${trimmed.trimEnd()}…`;
+  }
+  return lines;
+}
+
+export async function renderLuxuryAdCreative(
+  bytes: Uint8Array,
+  contentType: string,
+  spec: LuxuryAdCreativeSpec,
+): Promise<{ bytes: Uint8Array<ArrayBuffer>; mimeType: string } | null> {
+  if (typeof document === "undefined") return null;
+
+  const normalizedType = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (normalizedType.includes("image/svg")) return null;
+
+  const detectedFormat = detectImageFormat(bytes, normalizedType);
+  const resolvedMime = mimeTypeFromFormat(detectedFormat, normalizedType);
+  const targetMime =
+    spec.outputFormat === "jpeg"
+      ? "image/jpeg"
+      : spec.outputFormat === "png"
+        ? "image/png"
+        : "image/webp";
+
+  let sourceCanvas: HTMLCanvasElement;
+  try {
+    const blob = new Blob([concatByteArrays([bytes])], { type: resolvedMime });
+    sourceCanvas = await decodeBlobToCanvas(blob);
+  } catch {
+    return null;
+  }
+
+  const isStory = spec.variant === "story-whatsapp-9x16";
+  const width = 1080;
+  const height = isStory ? 1920 : 1350;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx || typeof canvas.toBlob !== "function") {
+    sourceCanvas.width = 0;
+    sourceCanvas.height = 0;
+    return null;
+  }
+
+  try {
+    const studioBg = sampleStudioBackground(sourceCanvas);
+
+    // Warm museum alabaster backdrop — calm, quiet-luxury editorial tone (zero visual fatigue).
+    ctx.fillStyle = "#FAF8F4";
+    ctx.fillRect(0, 0, width, height);
+
+    // Subtle champagne outer hairline frame.
+    const margin = isStory ? 56 : 44;
+    ctx.strokeStyle = "#DDD4C6";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(margin, margin, width - margin * 2, height - margin * 2);
+
+    // Respect Instagram/WhatsApp top & bottom safe zones on 9:16 stories.
+    const topSafe = isStory ? 230 : 108;
+    const brandText = spec.brandName.trim().toUpperCase() || "TIMES JEWELS";
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#1E3A2F";
+    ctx.font = '600 22px "Segoe UI", "Helvetica Neue", Arial, sans-serif';
+    ctx.fillText(brandText.split("").join(" "), width / 2, topSafe);
+
+    // Subtle diamond divider ornament.
+    ctx.fillStyle = "#A9926E";
+    ctx.font = "400 16px Georgia, serif";
+    ctx.fillText("✦", width / 2, topSafe + 34);
+
+    // Recessed studio image window matched seamlessly to source background tone.
+    const frameX = isStory ? 96 : 86;
+    const frameY = isStory ? topSafe + 82 : topSafe + 64;
+    const frameW = width - frameX * 2;
+    const frameH = isStory ? 960 : 810;
+
+    ctx.fillStyle = studioBg;
+    ctx.fillRect(frameX, frameY, frameW, frameH);
+
+    // Draw jewelry centered with crisp breathing room — never cropped.
+    const pad = 34;
+    const availW = frameW - pad * 2;
+    const availH = frameH - pad * 2;
+    const scale = Math.min(availW / sourceCanvas.width, availH / sourceCanvas.height);
+    const drawW = Math.max(1, Math.round(sourceCanvas.width * scale));
+    const drawH = Math.max(1, Math.round(sourceCanvas.height * scale));
+    const drawX = Math.round(frameX + (frameW - drawW) / 2);
+    const drawY = Math.round(frameY + (frameH - drawH) / 2);
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(sourceCanvas, 0, 0, sourceCanvas.width, sourceCanvas.height, drawX, drawY, drawW, drawH);
+
+    // Delicate inner frame around studio window.
+    ctx.strokeStyle = "#E5DDD0";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(frameX, frameY, frameW, frameH);
+
+    // Refined Georgia serif product title below image.
+    const titleStartY = frameY + frameH + (isStory ? 92 : 66);
+    ctx.fillStyle = "#1C2420";
+    ctx.font = '400 38px Georgia, "Times New Roman", serif';
+    const titleLines = wrapCanvasLines(ctx, spec.productTitle, width - 170, 2);
+    titleLines.forEach((line, idx) => {
+      ctx.fillText(line, width / 2, titleStartY + idx * 48);
+    });
+
+    const afterTitleY = titleStartY + titleLines.length * 48 + 16;
+
+    // Quiet attribute subline (Carat · Shape · Metal / Certification).
+    ctx.fillStyle = "#6B655D";
+    ctx.font = '600 16px "Segoe UI", "Helvetica Neue", Arial, sans-serif';
+    ctx.fillText(spec.subline, width / 2, afterTitleY);
+
+    // Subtle hairline separator above trust pillars.
+    const dividerY = afterTitleY + (isStory ? 54 : 36);
+    ctx.strokeStyle = "#DDD4C6";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(width / 2 - 120, dividerY);
+    ctx.lineTo(width / 2 + 120, dividerY);
+    ctx.stroke();
+
+    // Silent risk-reversal trust footer (non-pushy luxury reassurance).
+    const trustY = dividerY + (isStory ? 46 : 34);
+    ctx.fillStyle = "#3E4A44";
+    ctx.font = '500 15px "Segoe UI", "Helvetica Neue", Arial, sans-serif';
+    ctx.fillText(
+      "FREE RESIZING   ·   INSURED DELIVERY   ·   30-DAY RETURNS   ·   LIFETIME WARRANTY",
+      width / 2,
+      trustY,
+    );
+
+    // Quiet domain signature (kept inside Story safe zone).
+    const domainY = isStory ? trustY + 62 : height - margin - 34;
+    ctx.fillStyle = "#1E3A2F";
+    ctx.font = '600 16px "Segoe UI", "Helvetica Neue", Arial, sans-serif';
+    const domainText = spec.brandDomain.trim().toUpperCase() || "TIMESJEWELS.COM";
+    ctx.fillText(
+      isStory ? `PRIVATE CONSULTATION  ·  ${domainText}` : domainText,
+      width / 2,
+      domainY,
+    );
+
+    const encodedBlob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error("Could not encode luxury ad creative."));
+        },
+        targetMime,
+        targetMime === "image/png" ? 1 : 0.9,
+      );
+    });
+
+    const encodedBytes = await readBlobBytes(encodedBlob);
+    const actualFormat = detectImageFormat(encodedBytes, encodedBlob.type || targetMime);
+    const actualMime = mimeTypeFromFormat(actualFormat, encodedBlob.type || targetMime);
+    const strippedBytes = stripImageContainerMetadata(encodedBytes, actualMime);
+    return { bytes: strippedBytes, mimeType: actualMime };
+  } catch {
+    return null;
+  } finally {
+    sourceCanvas.width = 0;
+    sourceCanvas.height = 0;
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+}
+
+export type LuxuryAdCreativeVariant = "meta-feed-4x5" | "story-whatsapp-9x16";
+
+export type LuxuryAdCreativeSpec = {
+  variant: LuxuryAdCreativeVariant;
+  brandName: string;
+  brandDomain: string;
+  productTitle: string;
+  subline: string;
+  outputFormat?: ImageOutputFormat | undefined;
+};
+
+function wrapCanvasLines(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  maxLines: number,
+): string[] {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  const lines: string[] = [];
+  let current = "";
+
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (ctx.measureText(candidate).width <= maxWidth || !current) {
+      current = candidate;
+    } else {
+      lines.push(current);
+      if (lines.length === maxLines - 1) {
+        current = word;
+        break;
+      }
+      current = word;
+    }
+  }
+  if (current) lines.push(current);
+
+  if (lines.length > maxLines) {
+    lines.length = maxLines;
+  }
+  const lastIndex = lines.length - 1;
+  const lastLine = lines[lastIndex];
+  if (lastLine && ctx.measureText(lastLine).width > maxWidth) {
+    let trimmed = lastLine;
+    while (trimmed.length > 3 && ctx.measureText(`${trimmed}…`).width > maxWidth) {
+      trimmed = trimmed.slice(0, -1);
+    }
+    lines[lastIndex] = `${trimmed.trimEnd()}…`;
+  }
+  return lines;
+}
+
+export async function renderLuxuryAdCreative(
+  bytes: Uint8Array,
+  contentType: string,
+  spec: LuxuryAdCreativeSpec,
+): Promise<{ bytes: Uint8Array<ArrayBuffer>; mimeType: string } | null> {
+  if (typeof document === "undefined") return null;
+
+  const normalizedType = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (normalizedType.includes("image/svg")) return null;
+
+  const detectedFormat = detectImageFormat(bytes, normalizedType);
+  const resolvedMime = mimeTypeFromFormat(detectedFormat, normalizedType);
+  const targetMime =
+    spec.outputFormat === "jpeg"
+      ? "image/jpeg"
+      : spec.outputFormat === "png"
+        ? "image/png"
+        : "image/webp";
+
+  let sourceCanvas: HTMLCanvasElement;
+  try {
+    const blob = new Blob([concatByteArrays([bytes])], { type: resolvedMime });
+    sourceCanvas = await decodeBlobToCanvas(blob);
+  } catch {
+    return null;
+  }
+
+  const isStory = spec.variant === "story-whatsapp-9x16";
+  const width = 1080;
+  const height = isStory ? 1920 : 1350;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx || typeof canvas.toBlob !== "function") {
+    sourceCanvas.width = 0;
+    sourceCanvas.height = 0;
+    return null;
+  }
+
+  try {
+    const studioBg = sampleStudioBackground(sourceCanvas);
+
+    // Warm museum alabaster backdrop — calm, quiet-luxury editorial tone (zero visual fatigue).
+    ctx.fillStyle = "#FAF8F4";
+    ctx.fillRect(0, 0, width, height);
+
+    // Subtle champagne outer hairline frame.
+    const margin = isStory ? 56 : 44;
+    ctx.strokeStyle = "#DDD4C6";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(margin, margin, width - margin * 2, height - margin * 2);
+
+    // Respect Instagram/WhatsApp top & bottom safe zones on 9:16 stories.
+    const topSafe = isStory ? 230 : 108;
+    const brandText = spec.brandName.trim().toUpperCase() || "TIMES JEWELS";
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#1E3A2F";
+    ctx.font = '600 22px "Segoe UI", "Helvetica Neue", Arial, sans-serif';
+    ctx.fillText(brandText.split("").join(" "), width / 2, topSafe);
+
+    // Subtle diamond divider ornament.
+    ctx.fillStyle = "#A9926E";
+    ctx.font = "400 16px Georgia, serif";
+    ctx.fillText("✦", width / 2, topSafe + 34);
+
+    // Recessed studio image window matched seamlessly to source background tone.
+    const frameX = isStory ? 96 : 86;
+    const frameY = isStory ? topSafe + 82 : topSafe + 64;
+    const frameW = width - frameX * 2;
+    const frameH = isStory ? 960 : 810;
+
+    ctx.fillStyle = studioBg;
+    ctx.fillRect(frameX, frameY, frameW, frameH);
+
+    // Draw jewelry centered with crisp breathing room — never cropped.
+    const pad = 34;
+    const availW = frameW - pad * 2;
+    const availH = frameH - pad * 2;
+    const scale = Math.min(availW / sourceCanvas.width, availH / sourceCanvas.height);
+    const drawW = Math.max(1, Math.round(sourceCanvas.width * scale));
+    const drawH = Math.max(1, Math.round(sourceCanvas.height * scale));
+    const drawX = Math.round(frameX + (frameW - drawW) / 2);
+    const drawY = Math.round(frameY + (frameH - drawH) / 2);
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(
+      sourceCanvas,
+      0,
+      0,
+      sourceCanvas.width,
+      sourceCanvas.height,
+      drawX,
+      drawY,
+      drawW,
+      drawH,
+    );
+
+    // Delicate inner frame around studio window.
+    ctx.strokeStyle = "#E5DDD0";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(frameX, frameY, frameW, frameH);
+
+    // Refined Georgia serif product title below image.
+    const titleStartY = frameY + frameH + (isStory ? 92 : 66);
+    ctx.fillStyle = "#1C2420";
+    ctx.font = '400 38px Georgia, "Times New Roman", serif';
+    const titleLines = wrapCanvasLines(ctx, spec.productTitle, width - 170, 2);
+    titleLines.forEach((line, idx) => {
+      ctx.fillText(line, width / 2, titleStartY + idx * 48);
+    });
+
+    const afterTitleY = titleStartY + titleLines.length * 48 + 16;
+
+    // Quiet attribute subline (Carat · Shape · Metal / Certification).
+    ctx.fillStyle = "#6B655D";
+    ctx.font = '600 16px "Segoe UI", "Helvetica Neue", Arial, sans-serif';
+    ctx.fillText(spec.subline, width / 2, afterTitleY);
+
+    // Subtle hairline separator above trust pillars.
+    const dividerY = afterTitleY + (isStory ? 54 : 36);
+    ctx.strokeStyle = "#DDD4C6";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(width / 2 - 120, dividerY);
+    ctx.lineTo(width / 2 + 120, dividerY);
+    ctx.stroke();
+
+    // Silent risk-reversal trust footer (non-pushy luxury reassurance).
+    const trustY = dividerY + (isStory ? 46 : 34);
+    ctx.fillStyle = "#3E4A44";
+    ctx.font = '500 15px "Segoe UI", "Helvetica Neue", Arial, sans-serif';
+    ctx.fillText(
+      "FREE RESIZING   ·   INSURED DELIVERY   ·   30-DAY RETURNS   ·   LIFETIME WARRANTY",
+      width / 2,
+      trustY,
+    );
+
+    // Quiet domain signature (kept inside Story safe zone).
+    const domainY = isStory ? trustY + 62 : height - margin - 34;
+    ctx.fillStyle = "#1E3A2F";
+    ctx.font = '600 16px "Segoe UI", "Helvetica Neue", Arial, sans-serif';
+    const domainText = spec.brandDomain.trim().toUpperCase() || "TIMESJEWELS.COM";
+    ctx.fillText(
+      isStory ? `PRIVATE CONSULTATION  ·  ${domainText}` : domainText,
+      width / 2,
+      domainY,
+    );
+
+    const encodedBlob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error("Could not encode luxury ad creative."));
+        },
+        targetMime,
+        targetMime === "image/png" ? 1 : 0.9,
+      );
+    });
+
+    const encodedBytes = await readBlobBytes(encodedBlob);
+    const actualFormat = detectImageFormat(encodedBytes, encodedBlob.type || targetMime);
+    const actualMime = mimeTypeFromFormat(actualFormat, encodedBlob.type || targetMime);
+    const strippedBytes = stripImageContainerMetadata(encodedBytes, actualMime);
+    return { bytes: strippedBytes, mimeType: actualMime };
+  } catch {
+    return null;
+  } finally {
+    sourceCanvas.width = 0;
+    sourceCanvas.height = 0;
+    canvas.width = 0;
+    canvas.height = 0;
   }
 }
 

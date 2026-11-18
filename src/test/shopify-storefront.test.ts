@@ -4,7 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { extractImageStructure } from "@/lib/image-forensics";
 import {
   createProductsArchive,
+  DEFAULT_SEO_CLEAN_OPTIONS,
   FULL_CLEAN_OPTIONS,
+  getArchiveDownloadFilename,
   getBestMp4Source,
   getHighResolutionImageUrl,
   getProductAssets,
@@ -283,5 +285,118 @@ describe("shopify storefront helpers", () => {
       expect(entry.date.getUTCMonth()).toBe(NEUTRAL_ZIP_DATE.getUTCMonth());
       expect(entry.date.getUTCDate()).toBe(NEUTRAL_ZIP_DATE.getUTCDate());
     }
+  });
+
+  it("exports Times Jewels SEO archive with brand SEO filenames, seo-import.csv, JSON-LD, and zero source footprint", async () => {
+    expect(getArchiveDownloadFilename("engagement-rings", DEFAULT_SEO_CLEAN_OPTIONS)).toBe(
+      "times-jewels-seo-export.zip",
+    );
+
+    const collection: ShopifyCollection = {
+      id: 10,
+      title: "Engagement Rings",
+      handle: "engagement-rings",
+      products_count: 1,
+      image: null,
+    };
+
+    const detailPayload: ShopifyProductDetail = {
+      id: 202,
+      title: "Stienhardt 1.5ct Oval Solitaire Ring",
+      handle: "stienhardt-oval-solitaire",
+      vendor: "Stienhardt",
+      type: "Engagement Ring",
+      price: 295000,
+      media: [
+        {
+          id: 1,
+          media_type: "image",
+          src: "//cdn.shopify.com/s/files/1/stienhardt-oval.jpg",
+        },
+      ],
+    };
+
+    const dirtyJpeg = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xe1, 0x00, 0x06, 0x45, 0x78, 0x69, 0x66, 0xff, 0xda, 0x00, 0x04, 0x01,
+      0x00, 0x11, 0x22, 0xff, 0xd9,
+    ]);
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith("/api/shopify?")) {
+        return new Response(JSON.stringify(detailPayload), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(dirtyJpeg, {
+        status: 200,
+        headers: { "Content-Type": "image/jpeg" },
+      });
+    });
+
+    const { blob, result } = await createProductsArchive(
+      "https://stienhardt.com",
+      collection,
+      [
+        {
+          id: 202,
+          title: "Stienhardt 1.5ct Oval Solitaire Ring",
+          handle: "stienhardt-oval-solitaire",
+          images: [],
+        },
+      ],
+      () => {},
+      undefined,
+      DEFAULT_SEO_CLEAN_OPTIONS,
+    );
+
+    expect(result).toEqual({
+      files: 1,
+      skipped: 0,
+      products: 1,
+      cleanedImages: 1,
+      seoKitIncluded: true,
+      adKitIncluded: true,
+      adCreativesCreated: 0,
+    });
+
+    const zipBytes = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(blob);
+    });
+    const archive = await JSZip.loadAsync(zipBytes);
+    const files = Object.keys(archive.files).filter((name) => !archive.files[name]?.dir);
+
+    expect(files.sort()).toEqual([
+      "times-jewels/1-5ct-oval-solitaire-ring/images/times-jewels-1-5ct-oval-solitaire-ring-01.jpg",
+      "times-jewels/ad-growth-kit/START-HERE-AD-PLAYBOOK.md",
+      "times-jewels/ad-growth-kit/google-ads-keywords.csv",
+      "times-jewels/ad-growth-kit/google-ads-negative-keywords.txt",
+      "times-jewels/ad-growth-kit/meta-instagram-ads.csv",
+      "times-jewels/ad-growth-kit/whatsapp-vip-concierge-scripts.txt",
+      "times-jewels/seo-kit/product-schemas.json",
+      "times-jewels/seo-kit/seo-import.csv",
+    ]);
+
+    const csvText = await archive.file("times-jewels/seo-kit/seo-import.csv")?.async("text");
+    expect(csvText).toContain("https://timesjewels.com/products/1-5ct-oval-solitaire-ring");
+    expect(csvText).toContain("Times Jewels");
+    expect(csvText?.toLowerCase()).not.toContain("stienhardt");
+
+    const metaAdsText = await archive
+      .file("times-jewels/ad-growth-kit/meta-instagram-ads.csv")
+      ?.async("text");
+    expect(metaAdsText).toContain("Learn More");
+    expect(metaAdsText).toContain("timesjewels.com");
+    expect(metaAdsText?.toLowerCase()).not.toContain("stienhardt");
+
+    const schemaText = await archive
+      .file("times-jewels/seo-kit/product-schemas.json")
+      ?.async("text");
+    expect(schemaText).toContain("timesjewels.com");
+    expect(schemaText?.toLowerCase()).not.toContain("stienhardt");
   });
 });

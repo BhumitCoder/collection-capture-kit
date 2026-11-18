@@ -24,18 +24,23 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import type { ImageFrameMode, ImageOutputFormat } from "@/lib/image-forensics";
 import {
   createProductsArchive,
+  DEFAULT_SEO_CLEAN_OPTIONS,
   DEFAULT_STORE_URL,
   downloadArchive,
   fetchCollectionProducts,
   fetchCollections,
   FULL_CLEAN_OPTIONS,
+  getArchiveDownloadFilename,
   getHighResolutionImageUrl,
   getStoreOrigin,
   NO_CLEAN_OPTIONS,
+  resolveFilenameMode,
   SHOPIFY_PAGE_SIZE,
   type ArchiveCleanOptions,
+  type ArchiveFilenameMode,
   type ExportProgress,
   type ExportResult,
   type ShopifyCollection,
@@ -82,10 +87,18 @@ function mergeUniqueProducts(
   return merged;
 }
 
-function countEnabledCleanOptions(options: ArchiveCleanOptions): number {
-  return [options.stripImageMetadata, options.cleanFilenames, options.removeSourceFootprint].filter(
-    Boolean,
-  ).length;
+function isCleanModeActive(options: ArchiveCleanOptions): boolean {
+  const filenameMode = resolveFilenameMode(options);
+  return Boolean(
+    options.stripImageMetadata ||
+    options.removeSourceFootprint ||
+    filenameMode !== "original" ||
+    options.includeSeoKit ||
+    options.includeAdGrowthKit ||
+    (options.outputFormat && options.outputFormat !== "original") ||
+    (options.maxDimension && options.maxDimension > 0) ||
+    (options.frameMode && options.frameMode !== "original"),
+  );
 }
 
 function formatExportNotice(
@@ -93,16 +106,33 @@ function formatExportNotice(
   options: ArchiveCleanOptions,
   scope: "selected" | "collection",
 ): string {
-  const folderNoun = options.cleanFilenames ? "item folder" : "product folder";
+  const filenameMode = resolveFilenameMode(options);
+  const folderNoun = filenameMode === "neutral" ? "item folder" : "product folder";
   const folderJoin = scope === "collection" ? "across" : "in";
   const details: string[] = [];
   if (options.stripImageMetadata && result.cleanedImages) {
+    const formatNote =
+      options.outputFormat && options.outputFormat !== "original"
+        ? ` (${options.outputFormat.toUpperCase()}${options.maxDimension ? ` ≤${options.maxDimension}px` : ""})`
+        : "";
     details.push(
-      `${result.cleanedImages} image${result.cleanedImages === 1 ? "" : "s"} scrubbed A–Z`,
+      `${result.cleanedImages} image${result.cleanedImages === 1 ? "" : "s"} scrubbed A–Z${formatNote}`,
     );
   }
-  if (options.cleanFilenames) details.push("neutral filenames");
+  if (filenameMode === "seo") {
+    details.push(`${options.brandName?.trim() || "Brand"} SEO filenames`);
+  } else if (filenameMode === "neutral") {
+    details.push("neutral filenames");
+  }
   if (options.removeSourceFootprint) details.push("zero store footprint");
+  if (result.seoKitIncluded) details.push("seo-import.csv + JSON-LD");
+  if (result.adKitIncluded) {
+    details.push(
+      result.adCreativesCreated
+        ? `${result.adCreativesCreated} luxury ad cards + Ad & WhatsApp kit`
+        : "Ad & WhatsApp concierge kit",
+    );
+  }
 
   const skippedSuffix = result.skipped
     ? ` · ${result.skipped} unavailable file${result.skipped === 1 ? "" : "s"} skipped`
@@ -118,17 +148,52 @@ type CleanExportControlProps = {
   disabled?: boolean;
 };
 
+const FORMAT_OPTIONS: Array<{ value: ImageOutputFormat; label: string }> = [
+  { value: "webp", label: "WebP" },
+  { value: "jpeg", label: "JPG" },
+  { value: "png", label: "PNG" },
+  { value: "original", label: "Original" },
+];
+
+const SIZE_OPTIONS: Array<{ value: number; label: string }> = [
+  { value: 1600, label: "1600px" },
+  { value: 1200, label: "1200px" },
+  { value: 0, label: "Full" },
+];
+
+const FRAME_OPTIONS: Array<{ value: ImageFrameMode; label: string }> = [
+  { value: "original", label: "Original" },
+  { value: "square", label: "1:1 Square" },
+  { value: "portrait", label: "4:5 Editorial" },
+];
+
+const FILENAME_OPTIONS: Array<{ value: ArchiveFilenameMode; label: string }> = [
+  { value: "seo", label: "Brand SEO" },
+  { value: "neutral", label: "Neutral" },
+  { value: "original", label: "Original" },
+];
+
 function CleanExportControl({ options, onChange, disabled }: CleanExportControlProps) {
-  const enabledCount = countEnabledCleanOptions(options);
-  const allEnabled = enabledCount === 3;
-  const anyEnabled = enabledCount > 0;
+  const anyEnabled = isCleanModeActive(options);
+  const filenameMode = resolveFilenameMode(options);
+  const outputFormat = options.outputFormat ?? "original";
+  const maxDimension = options.maxDimension ?? 0;
+  const frameMode = options.frameMode ?? "original";
 
-  const toggleAll = () => {
-    onChange(allEnabled ? { ...NO_CLEAN_OPTIONS } : { ...FULL_CLEAN_OPTIONS });
-  };
-
-  const toggleKey = (key: keyof ArchiveCleanOptions) => {
-    onChange({ ...options, [key]: !options[key] });
+  const toggleMaster = () => {
+    onChange(
+      anyEnabled
+        ? {
+            ...NO_CLEAN_OPTIONS,
+            brandName: options.brandName,
+            brandDomain: options.brandDomain,
+          }
+        : {
+            ...DEFAULT_SEO_CLEAN_OPTIONS,
+            brandName: options.brandName || DEFAULT_SEO_CLEAN_OPTIONS.brandName,
+            brandDomain: options.brandDomain || DEFAULT_SEO_CLEAN_OPTIONS.brandDomain,
+          },
+    );
   };
 
   return (
@@ -138,18 +203,16 @@ function CleanExportControl({ options, onChange, disabled }: CleanExportControlP
         role="switch"
         aria-checked={anyEnabled}
         className="clean-toggle-button"
-        onClick={toggleAll}
+        onClick={toggleMaster}
         disabled={disabled}
         title={
-          allEnabled
-            ? "Clean A–Z enabled — click to switch to original files"
-            : "Enable full A–Z image metadata, signature, history, filename & footprint cleaning"
+          anyEnabled
+            ? "Clean A–Z + SEO Boost enabled — click to switch to original files"
+            : "Enable Clean A–Z metadata scrub, WebP optimization, brand SEO filenames & JSON-LD kit"
         }
       >
         <ShieldCheck aria-hidden="true" />
-        <span>
-          {allEnabled ? "Clean A–Z" : anyEnabled ? `Clean (${enabledCount}/3)` : "Clean A–Z"}
-        </span>
+        <span>Clean A–Z</span>
         <span className="clean-state-pill">{anyEnabled ? "ON" : "OFF"}</span>
       </button>
       <Popover>
@@ -158,7 +221,7 @@ function CleanExportControl({ options, onChange, disabled }: CleanExportControlP
             type="button"
             className="clean-options-trigger"
             aria-label="Clean export options"
-            title="Customize A–Z clean options"
+            title="Customize Clean A–Z & SEO export options"
             disabled={disabled}
           >
             <SlidersHorizontal aria-hidden="true" />
@@ -166,40 +229,49 @@ function CleanExportControl({ options, onChange, disabled }: CleanExportControlP
         </PopoverTrigger>
         <PopoverContent side="top" align="end" className="clean-popover">
           <div className="clean-popover-head">
-            <div className="eyebrow">BROWSER-LOCAL SCRUB</div>
-            <h3>A–Z Clean ZIP Export</h3>
+            <div className="eyebrow">BROWSER-LOCAL SCRUB &amp; SEO KIT</div>
+            <h3>Clean A–Z &amp; Brand SEO Export</h3>
             <p>
-              Clean every image and archive detail locally in your browser before downloading the
-              ZIP.
+              Scrubs every image locally, converts to fast web formats, and generates ready-to-paste
+              SEO metadata for your storefront.
             </p>
           </div>
+
+          <div className="clean-brand-grid">
+            <label>
+              <span>BRAND NAME</span>
+              <Input
+                aria-label="Brand name"
+                value={options.brandName ?? ""}
+                onChange={(event) => onChange({ ...options, brandName: event.target.value })}
+                placeholder="Times Jewels"
+              />
+            </label>
+            <label>
+              <span>BRAND DOMAIN</span>
+              <Input
+                aria-label="Brand domain"
+                value={options.brandDomain ?? ""}
+                onChange={(event) => onChange({ ...options, brandDomain: event.target.value })}
+                placeholder="timesjewels.com"
+              />
+            </label>
+          </div>
+
           <div className="clean-option-list">
             <label className="clean-option-row">
               <input
                 type="checkbox"
                 checked={options.stripImageMetadata}
-                onChange={() => toggleKey("stripImageMetadata")}
+                onChange={() =>
+                  onChange({ ...options, stripImageMetadata: !options.stripImageMetadata })
+                }
               />
               <span>
-                <strong>Image metadata, signatures &amp; history</strong>
+                <strong>Image metadata, signatures &amp; history (A–Z)</strong>
                 <small>
                   Re-encodes every photo locally to wipe EXIF, XMP, IPTC, GPS, camera/device, dates,
-                  editing history, C2PA signatures, ICC profiles, thumbnails &amp; original SHA-256
-                  footprint.
-                </small>
-              </span>
-            </label>
-            <label className="clean-option-row">
-              <input
-                type="checkbox"
-                checked={options.cleanFilenames}
-                onChange={() => toggleKey("cleanFilenames")}
-              />
-              <span>
-                <strong>Clean neutral filenames &amp; folders</strong>
-                <small>
-                  Replaces store, collection &amp; product slugs with neutral names (
-                  <code>clean-media/item-01/images/image-01.jpg</code>) and a clean ZIP filename.
+                  editing history, C2PA signatures, ICC profiles, thumbnails &amp; original SHA-256.
                 </small>
               </span>
             </label>
@@ -207,40 +279,178 @@ function CleanExportControl({ options, onChange, disabled }: CleanExportControlP
               <input
                 type="checkbox"
                 checked={options.removeSourceFootprint}
-                onChange={() => toggleKey("removeSourceFootprint")}
+                onChange={() =>
+                  onChange({ ...options, removeSourceFootprint: !options.removeSourceFootprint })
+                }
               />
               <span>
-                <strong>Remove store footprint &amp; timestamps</strong>
+                <strong>Remove source store footprint &amp; timestamps</strong>
                 <small>
-                  Omits <code>manifest.json</code> &amp; <code>product.json</code> (store URLs,
-                  vendor, CDN links) and neutralizes all ZIP file dates.
+                  Omits source <code>manifest.json</code> &amp; <code>product.json</code> (store
+                  URLs, vendor, CDN links) and neutralizes all ZIP file dates.
+                </small>
+              </span>
+            </label>
+            <label className="clean-option-row">
+              <input
+                type="checkbox"
+                checked={Boolean(options.includeSeoKit)}
+                onChange={() => onChange({ ...options, includeSeoKit: !options.includeSeoKit })}
+              />
+              <span>
+                <strong>Generate SEO CSV &amp; Product JSON-LD Schema</strong>
+                <small>
+                  Adds <code>seo-kit/seo-import.csv</code> &amp; <code>product-schemas.json</code>{" "}
+                  with clean Meta Titles, Descriptions, per-image Alt texts &amp; rich snippets for{" "}
+                  <code>{options.brandDomain?.trim() || "timesjewels.com"}</code>.
+                </small>
+              </span>
+            </label>
+            <label className="clean-option-row">
+              <input
+                type="checkbox"
+                checked={Boolean(options.includeAdGrowthKit)}
+                onChange={() =>
+                  onChange({ ...options, includeAdGrowthKit: !options.includeAdGrowthKit })
+                }
+              />
+              <span>
+                <strong>Quiet-Luxury Ads &amp; WhatsApp Conversion Kit</strong>
+                <small>
+                  Renders calm <code>4:5</code> Meta Feed &amp; <code>9:16</code> Story/WhatsApp
+                  editorial cards (keeps <code>images/</code> pure for Google Shopping), plus 3
+                  non-pushy ad angles, Google Ads Exact/Phrase + Negative keywords &amp; VIP
+                  WhatsApp closing scripts.
                 </small>
               </span>
             </label>
           </div>
+
+          <div className="clean-chip-groups">
+            <div className="clean-chip-row">
+              <span>Format</span>
+              <div className="clean-chips">
+                {FORMAT_OPTIONS.map((item) => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    className={outputFormat === item.value ? "is-selected" : ""}
+                    onClick={() => onChange({ ...options, outputFormat: item.value })}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="clean-chip-row">
+              <span>Max size</span>
+              <div className="clean-chips">
+                {SIZE_OPTIONS.map((item) => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    className={maxDimension === item.value ? "is-selected" : ""}
+                    onClick={() => onChange({ ...options, maxDimension: item.value })}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="clean-chip-row">
+              <span>Framing</span>
+              <div className="clean-chips">
+                {FRAME_OPTIONS.map((item) => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    className={frameMode === item.value ? "is-selected" : ""}
+                    onClick={() => onChange({ ...options, frameMode: item.value })}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="clean-chip-row">
+              <span>Filenames</span>
+              <div className="clean-chips">
+                {FILENAME_OPTIONS.map((item) => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    className={filenameMode === item.value ? "is-selected" : ""}
+                    onClick={() =>
+                      onChange({
+                        ...options,
+                        filenameMode: item.value,
+                        cleanFilenames: item.value !== "original",
+                      })
+                    }
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
           <div className="clean-popover-actions">
             <Button
               type="button"
               size="sm"
-              variant={allEnabled ? "default" : "outline"}
-              onClick={() => onChange({ ...FULL_CLEAN_OPTIONS })}
+              variant={options.includeSeoKit && outputFormat === "webp" ? "default" : "outline"}
+              onClick={() =>
+                onChange({
+                  ...DEFAULT_SEO_CLEAN_OPTIONS,
+                  brandName: options.brandName || DEFAULT_SEO_CLEAN_OPTIONS.brandName,
+                  brandDomain: options.brandDomain || DEFAULT_SEO_CLEAN_OPTIONS.brandDomain,
+                })
+              }
             >
-              Clean all (A–Z)
+              SEO Boost
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                onChange({
+                  ...FULL_CLEAN_OPTIONS,
+                  outputFormat: "original",
+                  maxDimension: 0,
+                  frameMode: "original",
+                  filenameMode: "neutral",
+                  includeSeoKit: false,
+                  includeAdGrowthKit: false,
+                  brandName: options.brandName,
+                  brandDomain: options.brandDomain,
+                })
+              }
+            >
+              Neutral Clean
             </Button>
             <Button
               type="button"
               size="sm"
               variant={!anyEnabled ? "default" : "ghost"}
-              onClick={() => onChange({ ...NO_CLEAN_OPTIONS })}
+              onClick={() =>
+                onChange({
+                  ...NO_CLEAN_OPTIONS,
+                  brandName: options.brandName,
+                  brandDomain: options.brandDomain,
+                })
+              }
             >
-              Original files
+              Original
             </Button>
           </div>
+
           <div className="clean-popover-note">
             <LockKeyhole aria-hidden="true" />
             <span>
-              Image scrubbing runs 100% in your browser. HD videos keep clean filenames &amp; dates
-              without re-encoding.
+              All image scrubbing, WebP conversion &amp; SEO file generation run 100% locally in
+              your browser.
             </span>
           </div>
         </PopoverContent>
@@ -266,7 +476,7 @@ function Index() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [progress, setProgress] = useState<ExportProgress | null>(null);
-  const [cleanOptions, setCleanOptions] = useState<ArchiveCleanOptions>(FULL_CLEAN_OPTIONS);
+  const [cleanOptions, setCleanOptions] = useState<ArchiveCleanOptions>(DEFAULT_SEO_CLEAN_OPTIONS);
 
   const collectionsAbortRef = useRef<AbortController | null>(null);
   const productsAbortRef = useRef<AbortController | null>(null);
@@ -462,9 +672,7 @@ function Index() {
         controller.signal,
         cleanOptions,
       );
-      const archiveFilename = cleanOptions.cleanFilenames
-        ? "studio-export-clean.zip"
-        : `${activeCollection.handle}-media.zip`;
+      const archiveFilename = getArchiveDownloadFilename(activeCollection.handle, cleanOptions);
       downloadArchive(blob, archiveFilename);
       setNotice(formatExportNotice(result, cleanOptions, "selected"));
     } catch (cause) {
@@ -524,9 +732,7 @@ function Index() {
         controller.signal,
         cleanOptions,
       );
-      const archiveFilename = cleanOptions.cleanFilenames
-        ? "studio-export-clean.zip"
-        : `${activeCollection.handle}-media.zip`;
+      const archiveFilename = getArchiveDownloadFilename(activeCollection.handle, cleanOptions);
       downloadArchive(blob, archiveFilename);
       setNotice(formatExportNotice(result, cleanOptions, "collection"));
     } catch (cause) {
@@ -964,10 +1170,12 @@ function Index() {
               <span>{progress?.label ?? "Preparing download…"}</span>
               <span>{progressPercent}</span>
             </div>
-          ) : countEnabledCleanOptions(cleanOptions) > 0 ? (
+          ) : isCleanModeActive(cleanOptions) ? (
             <span>
-              <ShieldCheck aria-hidden="true" /> Clean A–Z mode · metadata, signatures, history
-              &amp; filenames scrubbed
+              <ShieldCheck aria-hidden="true" /> {cleanOptions.brandName?.trim() || "Times Jewels"}{" "}
+              SEO &amp; Ads Kit · {(cleanOptions.outputFormat ?? "original").toUpperCase()}
+              {cleanOptions.maxDimension ? ` ≤${cleanOptions.maxDimension}px` : ""}
+              {cleanOptions.includeAdGrowthKit ? " + 4:5/9:16 Ads & Scripts" : ""}
             </span>
           ) : (
             <span>
