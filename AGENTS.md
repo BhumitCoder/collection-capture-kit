@@ -10,3 +10,5 @@
 <!-- LOVABLE:END -->
 
 Keep image inspection and metadata removal local to the browser so source photos never leave the user's device or pass through a service.
+
+Keep local image auditing separate from storefront collection exports; the inspector only reads user-selected image files in the browser.

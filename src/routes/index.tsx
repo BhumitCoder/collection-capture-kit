@@ -21,6 +21,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ImageInspector } from "@/components/image-inspector";
 import {
   createProductsArchive,
   DEFAULT_STORE_URL,
@@ -56,6 +57,7 @@ export const Route = createFileRoute("/")({
 });
 
 function Index() {
+  const [view, setView] = useState<"catalog" | "inspect">("catalog");
   const [storeInput, setStoreInput] = useState(DEFAULT_STORE_URL);
   const [store, setStore] = useState(DEFAULT_STORE_URL);
   const [collections, setCollections] = useState<ShopifyCollection[]>([]);
@@ -92,6 +94,26 @@ function Index() {
 
   const allVisibleSelected =
     filteredProducts.length > 0 && filteredProducts.every((product) => selected.has(product.handle));
+
+  if (view === "inspect") {
+    return (
+      <div className="min-h-screen bg-background text-foreground">
+        <header className="topbar">
+          <div className="topbar-brand">
+            <span className="brand-mark"><Gem aria-hidden="true" /></span>
+            <span className="brand-word">STUDIO <span>VAULT</span></span>
+          </div>
+          <div className="topbar-divider" />
+          <div className="topbar-caption">IMAGE INSPECTION</div>
+          <nav className="topbar-nav" aria-label="Workspace">
+            <Button variant="ghost" size="sm" onClick={() => setView("catalog")}>Shopify library</Button>
+            <Button variant="outline" size="sm" aria-current="page">Image details</Button>
+          </nav>
+        </header>
+        <ImageInspector />
+      </div>
+    );
+  }
 
   const loadCollectionList = async (nextStore = store) => {
     setLoadingCollections(true);
@@ -240,6 +262,10 @@ function Index() {
         </div>
         <div className="topbar-divider" />
         <div className="topbar-caption">SHOPIFY MEDIA LIBRARY</div>
+        <nav className="topbar-nav" aria-label="Workspace">
+          <Button variant="outline" size="sm" aria-current="page">Shopify library</Button>
+          <Button variant="ghost" size="sm" onClick={() => setView("inspect")}>Image details</Button>
+        </nav>
         <div className="topbar-right">
           <span className="connection-dot" />
           <span>{collections.length ? `${collections.length} collections indexed` : "Storefront browser"}</span>
